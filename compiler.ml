@@ -7,7 +7,7 @@ type token =  OpenBrace
 			| OpenParen
 			| CloseParen
 			| Semicolon
-			| Negation
+			| Minus
 			| BitwiseComplement
 			| LogicalNegation
 			| Keyword of string
@@ -16,7 +16,7 @@ type token =  OpenBrace
 			| None
 
 
-type operator = Negation | BitwiseComplement | LogicalNegation
+type operator = Minus | BitwiseComplement | LogicalNegation
 type exp = Const of int | UnOp of operator*exp
 type statement = Return of exp
 type fun_decl = Function of string*statement
@@ -60,7 +60,7 @@ let split_and_flatten (input: string list) (regex: string) : string list =
 
 let split_into_strings (str: string) : string list =
 	let token_string = Str.split (Str.regexp "[ \n\r\x0c\t]+") str in 
-	split_and_flatten token_string "[{}();]"
+	split_and_flatten token_string "[-!~{}();]"
 ;;
 
 let translate_to_token (s: string) : token = 
@@ -70,7 +70,7 @@ let translate_to_token (s: string) : token =
 	if s = "(" then OpenParen else
 	if s = ")" then CloseParen else
 	if s = ";" then Semicolon else
-	if s = "-" then Negation else
+	if s = "-" then Minus else
 	if s = "~" then BitwiseComplement else
 	if s = "!" then LogicalNegation else
 	if List.mem s keywords then Keyword(s) else
@@ -95,7 +95,7 @@ let print_token (t: token) : string =
 	| OpenParen -> "OpenParen"
 	| CloseParen -> "CloseParen"
 	| Semicolon -> "Semicolon"
-	| Negation -> "Negation"
+	| Minus -> "Minus"
 	| BitwiseComplement -> "BitwiseComplement"
 	| LogicalNegation -> "LogicalNegation"
 	| Keyword(s) -> "Keyword "^s
@@ -124,13 +124,13 @@ let next_token (tokens: token list) : token*(token list) =
 let rec parse_exp (tokens: token list) : exp*(token list) = 
 	match next_token tokens with
 	| (Integer(x), tl) -> (Const(x), tl)
-	| (Negation, tl) -> let (inner_exp, new_tl) = parse_exp tl in
-						(UnOp(Negation, inner_exp), new_tl)
+	| (Minus, tl) -> let (inner_exp, new_tl) = parse_exp tl in
+						(UnOp(Minus, inner_exp), new_tl)
 	| (BitwiseComplement, tl) -> let (inner_exp, new_tl) = parse_exp tl in
 						(UnOp(BitwiseComplement, inner_exp), new_tl)
 	| (LogicalNegation, tl) -> let (inner_exp, new_tl) = parse_exp tl in
 						(UnOp(LogicalNegation, inner_exp), new_tl)
-	| _ -> raise (Parse_exn "parse_exp expects only an Integer token")
+	| _ -> raise (Parse_exn "parse_exp expects an Integer or Unary Operation")
 ;;
 
 let parse_statement (tokens: token list) : statement*(token list) = 
@@ -163,9 +163,24 @@ let parse (tokens: token list) : program =
 
 
 (* Generate *)
+
+let rec generate_expression (e: exp) : string =
+	match e with
+	| Const(x) -> Printf.sprintf "movl $%i, %%eax\n" x
+	| UnOp(op, inner_exp) -> 
+		let inner_exp_assembly = generate_expression inner_exp in
+		let unary_op_assembly =
+			(match op with
+			| Minus -> "neg %eax\n"
+			| LogicalNegation -> "cmpl $0, %eax\n movl $0, %eax\n sete %al\n"
+			| BitwiseComplement -> "not %eax\n") in
+		inner_exp_assembly^unary_op_assembly
+
+
 let generate_statement (st: statement) : string =
 	match st with
-	| Return(Const(x)) -> Printf.sprintf "movl $%i, %%eax\nret" x
+	| Return(e) -> 
+		(generate_expression e)^"ret\n"
 ;;
 
 let generate_function (f: fun_decl) : string =
@@ -180,7 +195,7 @@ let generate (ast: program) : string =
 
 
 let all_lines = single_string (read_lines Sys.argv.(1)) " " in
-let assembly_filename = "/mnt/c/Users/Varqa/Documents/Compiler/write_a_c_compiler/"^(List.hd (Str.split (regexp "\.") Sys.argv.(1)))^".s" in
+let assembly_filename = "/mnt/c/Users/Varqa/Documents/Compiler/write_a_c_compiler/"^(List.hd (Str.split (regexp "\\.") Sys.argv.(1)))^".s" in
 let out = open_out assembly_filename in
 print_tokens (lex all_lines);
 Printf.fprintf out "%s" (generate (parse (lex all_lines)));;
