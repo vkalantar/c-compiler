@@ -26,6 +26,7 @@ type token =  OpenBrace
 			| Keyword of string
 			| Integer of int
 			| Identifier of string
+			| None
 
 (* for AST (parsing) *)
 
@@ -91,22 +92,19 @@ let rec single_string (lst: string list) (delim: string) : string =
 
 
 (*Lexing*)
-let split_and_flatten (input: string list) (regex: string) : string list = 
-	let remove_id (split: Str.split_result) : string =
-		match split with
-		| Text(s)-> s
-		| Delim(s) -> s
-	in
-	List.map remove_id (List.concat (List.map (Str.full_split (Str.regexp regex)) input )) 
+
+let to_list (s:string) : char list =
+  let rec loop acc i =
+    if i = -1 then acc
+    else
+      loop (s.[i] :: acc) (i-1)
+  in loop [] (String.length s - 1)
 ;;
 
-let split_into_strings (str: string) : string list =
-	let token_string = Str.split (Str.regexp "[ \n\r\x0c\t]+") str in
-	split_and_flatten token_string "[- { } ( ) ; ! ~ \\+ \\* \\/ ]"
-;;
-
-let translate_to_token (s: string) : token = 
+let translate_to_token (cl: char list) : token = 
+	let s = String.concat "" (List.map (String.make 1) cl) in 
 	let keywords = ["int"; "return"] in
+	if s = ""  then None else
 	if s = "{" then OpenBrace else
 	if s = "}" then CloseBrace else
 	if s = "(" then OpenParen else
@@ -121,16 +119,31 @@ let translate_to_token (s: string) : token =
 	if List.mem s keywords then Keyword(s) else
 	if Str.string_match (Str.regexp "[0-9]+") s 0 then Integer(int_of_string s) else
 	Identifier(s)
- ;;
-
-let rec lex_helper (words: string list) : token list = 
-	match words with
-	| [] -> []
-	| hd::tl -> (translate_to_token hd)::(lex_helper tl)
 ;;
 
-let lex (program_text: string) : token list = 
-	lex_helper (split_into_strings program_text)
+
+let rec lex_helper (input: char list) (word_acc: char list) (token_acc: token list) : token list = 
+	let single_char_symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/' ] in
+	let whitespaces = [' '; '\n'; '\r'; '\x0c'; '\t'] in
+	match input with
+	| [] -> token_acc
+	| hd::tl ->
+		if List.mem hd whitespaces then
+			let t = translate_to_token word_acc in
+			(if t == None then lex_helper tl [] token_acc
+			else lex_helper tl [] (t::token_acc)) 
+		else if List.mem hd single_char_symbols then
+			let t = translate_to_token word_acc in
+			let f = translate_to_token [hd] in
+			(if t == None then lex_helper tl [] (f::token_acc)
+			else lex_helper tl [] (f::t::token_acc) )
+		else
+			lex_helper tl (word_acc@[hd]) token_acc
+;;
+
+let lex (input: char list) : token list = 
+	let tokens = lex_helper input [] [] in
+	List.rev tokens
 ;;
 
 let print_token (t: token) : string = 
@@ -157,6 +170,7 @@ let print_token (t: token) : string =
 	| Keyword(s) -> "Keyword "^s
 	| Identifier(s) -> "Identifier "^s
 	| Integer(x) -> "Integer "^(string_of_int x)
+	| None -> "None"
 ;;
 
 
@@ -188,7 +202,7 @@ let token_to_binary_operator (t: token) : binary_operator =
 	| OrToken -> OrOp(OR)
 	| OpenBrace | CloseBrace | OpenParen | CloseParen -> raise (Parse_exn "This is not a binary operation")
 	| Semicolon | BitwiseComplement | LogicalNegation -> raise (Parse_exn "This is not a binary operation")
-	| Keyword(_) | Identifier(_) | Integer(_) -> raise (Parse_exn "This is not a binary operation")
+	| Keyword(_) | Identifier(_) | Integer(_) | None -> raise (Parse_exn "This is not a binary operation")
 ;;
 
 			
@@ -416,8 +430,8 @@ let generate (ast: program) : string =
 let all_lines = single_string (read_lines Sys.argv.(1)) " " in
 let assembly_filename = "/mnt/c/Users/Varqa/Documents/Compiler/write_a_c_compiler/"^(List.hd (Str.split (regexp "\\.") Sys.argv.(1)))^".s" in
 let out = open_out assembly_filename in
-print_tokens (lex all_lines);
+print_tokens (lex (to_list all_lines));
 print_string "\n";
-Printf.fprintf out "%s" (generate (parse (lex all_lines)));;
+Printf.fprintf out "%s" (generate (parse (lex (to_list all_lines))));;
 
 
