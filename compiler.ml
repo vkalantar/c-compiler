@@ -116,33 +116,60 @@ let translate_to_token (cl: char list) : token =
 	if s = "+" then Plus else
 	if s = "*" then Times else
 	if s = "/" then ForwardSlash else
+	if s = "<" then LTToken else
+	if s = ">" then GTToken else
+	if s = "<=" then LTorEqualToken else
+	if s = ">=" then GTorEqualToken else 
+	if s = "&&" then AndToken else
+	if s = "||" then OrToken else
+	if s = "==" then EqualToken else
+	if s = "!=" then NotEqualToken else
 	if List.mem s keywords then Keyword(s) else
 	if Str.string_match (Str.regexp "[0-9]+") s 0 then Integer(int_of_string s) else
-	Identifier(s)
+	if Str.string_match (Str.regexp "[a-zA-z]") s 0 then Identifier(s) else
+	None
 ;;
 
+let symbols_to_tokens (symbols: char list) : token list = 
+	let rec helper (sym: char list) (acc: token list) : token list = 
+		match sym with
+		| [] -> acc
+		| a::[] -> (translate_to_token [a])::acc
+		| a::b::tl -> 
+			let double = translate_to_token [a; b] in
+			if double != None then
+				helper tl (double::acc)
+			else
+				let single = translate_to_token [a] in
+				helper (b::tl) (single::acc)
+	in
+	helper symbols []
+;;
 
-let rec lex_helper (input: char list) (word_acc: char list) (token_acc: token list) : token list = 
-	let single_char_symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/' ] in
+let rec lex_helper (input: char list) (word_acc: char list) (symbol_acc: char list) (token_acc: token list) : token list = 
+	let symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/'; '<'; '>'; '&'; '|'; '=' ] in
 	let whitespaces = [' '; '\n'; '\r'; '\x0c'; '\t'] in
 	match input with
 	| [] -> token_acc
 	| hd::tl ->
 		if List.mem hd whitespaces then
-			let t = translate_to_token word_acc in
-			(if t == None then lex_helper tl [] token_acc
-			else lex_helper tl [] (t::token_acc)) 
-		else if List.mem hd single_char_symbols then
-			let t = translate_to_token word_acc in
-			let f = translate_to_token [hd] in
-			(if t == None then lex_helper tl [] (f::token_acc)
-			else lex_helper tl [] (f::t::token_acc) )
+			let w = translate_to_token word_acc in
+			let s = symbols_to_tokens symbol_acc in
+			(if w != None then lex_helper tl [] [] (w::token_acc) else 
+			 if s != []   then lex_helper tl [] [] (s@token_acc) else
+							   lex_helper tl [] [] token_acc) 
+		else if List.mem hd symbols then
+			let w = translate_to_token word_acc in
+			(if w != None then lex_helper tl [] (symbol_acc@[hd]) (w::token_acc) else 	
+							   lex_helper tl [] (symbol_acc@[hd]) token_acc)
 		else
-			lex_helper tl (word_acc@[hd]) token_acc
+			let s = symbols_to_tokens symbol_acc in
+			(if s != [] then lex_helper tl (word_acc@[hd]) [] (s@token_acc) else 	
+							   lex_helper tl (word_acc@[hd]) [] token_acc)
 ;;
 
 let lex (input: char list) : token list = 
-	let tokens = lex_helper input [] [] in
+	let tokens = lex_helper input [] [] [] in
 	List.rev tokens
 ;;
 
