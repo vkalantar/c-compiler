@@ -51,17 +51,9 @@ and eq_exp = EqBinOp of eq_operator*eq_exp*eq_exp | RelExp of rel_exp
 and rel_exp = RelBinOp of rel_operator*rel_exp*rel_exp | AddExp of add_exp
 and add_exp = AddBinOp of add_sub_operator*add_exp*add_exp | MulExp of mul_exp
 and mul_exp = MulBinOp of mul_div_operator*mul_exp*mul_exp | Factor of factor
-and factor = Const of int | UnOp of unary_operator*factor | Parenthetical of (*log_or_exp*) add_exp
+and factor = Const of int | UnOp of unary_operator*factor | Parenthetical of log_or_exp
 
-(*type exp =    LogOr of log_or_exp
-			| LogAnd of log_and_exp
-			| Eq of eq_exp
-			| Rel of rel_exp
-			| AddSub of add_exp
-			| MulDiv of mul_exp*)
-
-
-type statement = Return of (*log_or_exp*) add_exp
+type statement = Return of log_or_exp
 type fun_decl = Function of string*statement
 type program = Program of fun_decl
 
@@ -316,7 +308,7 @@ and parse_factor (tokens: token list) : factor*(token list) =
 	print_tokens tokens;
 	print_string "parse_factor\n";
 	match tokens with
-	| OpenParen::tl -> (match parse_add_exp tl with
+	| OpenParen::tl -> (match parse_logical_or_exp tl with
 						| (e, CloseParen::new_tl) -> (Parenthetical(e), new_tl)
 						| _ -> raise (Parse_exn "Missing expression or ')' in factor"))
 	| Minus::tl -> let (inner_factor, new_tl) = parse_factor tl in
@@ -330,39 +322,11 @@ and parse_factor (tokens: token list) : factor*(token list) =
 		(Const(x), tl)
 	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, or BinOp")
 ;;
-(*and parse_mul_exp (tokens: token list) : mul_exp*(token list) = 
-	let (fac, tl) = parse_factor tokens in
-	let rec loop (lst: token list) (acc: mul_exp) : mul_xp*(token list) =
-		match lst with
-		| Times::tl -> 
-			let (new_fac, new_tl) = parse_factor tl in
-			loop new_tl (TermBinOp(Multiply, acc, Factor(new_fac)))
-		| ForwardSlash::tl -> 
-			let (new_fac, new_tl) = parse_factor tl in
-			loop new_tl (TermBinOp(Divide, acc, Factor(new_fac)))
-		| _ -> (acc, lst)
-	in
-	loop tl (Factor(fac))
-
-and parse_add_exp (tokens: token list) : add_expexp*(token list) =
-	let (t, tl) = parse_term tokens in
-	let rec loop (lst: token list) (acc: add_exp) : add_exp*(token list) =
-		match lst with
-		| Plus::tl -> 
-			let (new_term, new_tl) = parse_mul_exp tl in
-			loop new_tl (AddBinOp(Add, acc, Term(new_term)))
-		| Minus::tl -> 
-			let (new_term, new_tl) = parse_term tl in
-			loop new_tl (AddBinOp(Subtract, acc, Term(new_term)))
-		| _ -> (acc, lst)
-	in
-	loop tl (MulExp(t))
-;;*)
 
 let parse_statement (tokens: token list) : statement*(token list) = 
 	match tokens with
 	| Keyword(s)::tl when s="return" ->
-		(match parse_add_exp tl with 
+		(match parse_logical_or_exp tl with 
 		| (e, Semicolon::tl) -> (Return(e), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
 	| _ -> raise (Parse_exn "Missing 'return' keyword")
@@ -388,24 +352,15 @@ let parse (tokens: token list) : program =
 ;;
 
 (* Generate *)
+let generate_binop (generator: 'a -> string) (e1: 'a) (e2: 'a) : string =
+	(generator e1)
+	^"pushq %rax\n"
+	^(generator e2)
+	^"popq %rcx\n"
+;;
 
-let rec generate_add_exp (e: add_exp) : string =
-	match e with
-	| MulExp(e1) -> generate_mul_exp e1
-	| AddBinOp(op, e1, e2) ->
-		(match op with 
-		| Add -> (generate_add_exp e1)
-				^"pushq %rax\n"
-				^(generate_add_exp e2)
-				^"popq %rcx\n"
-				^"addq %rcx, %rax\n"
-		| Subtract -> (generate_add_exp e2)
-						^"pushq %rax\n"
-						^(generate_add_exp e1)
-						^"popq %rcx\n"
-						^"subq %rcx, %rax\n")
 
-and generate_factor (f: factor) : string =
+let rec generate_factor (f: factor) : string =
 	match f with 
 	| Const(x) -> Printf.sprintf "movq $%i, %%rax\n" x
 	| UnOp(op, inner_factor) -> 
@@ -417,30 +372,92 @@ and generate_factor (f: factor) : string =
 			| BitwiseComplement -> "not %rax\n") 
 		in
 		inner_fac_assembly^unary_op_assembly
-	| Parenthetical(e) -> generate_add_exp e
+	| Parenthetical(e) ->  generate_logical_or_exp e
 
 and generate_mul_exp (e: mul_exp) : string =
 	match e with
 	| Factor(f) -> generate_factor f
 	| MulBinOp(op, e1, e2) ->
 		(match op with
-		| Multiply -> (generate_mul_exp e1)
-						^"pushq %rax\n"
-						^(generate_mul_exp e2)
-						^"popq %rcx\n"
-						^"imulq %rcx\n"
-		| Divide -> (generate_mul_exp e2)
-					^"pushq %rax\n"
-					^(generate_mul_exp e1)
-					^"popq %rcx\n"
+		| Multiply -> (generate_binop generate_mul_exp e1 e2)
+					  ^"imulq %rcx\n"
+		| Divide -> (generate_binop generate_mul_exp e2 e1)
 					^"xor %rdx, %rdx\n"
 					^"idivq %rcx\n")
+
+and generate_add_exp (e: add_exp) : string =
+	match e with
+	| MulExp(e1) -> generate_mul_exp e1
+	| AddBinOp(op, e1, e2) ->
+		(match op with 
+		| Add -> (generate_binop generate_add_exp e1 e2)
+				^"addq %rcx, %rax\n"
+		| Subtract -> (generate_binop generate_add_exp e2 e1)
+						^"subq %rcx, %rax\n")
+
+and generate_relational_exp (e: rel_exp) : string = 
+	match e with
+	| AddExp(e1) -> generate_add_exp e1
+	| RelBinOp(op, e1, e2) ->
+		(match op with
+		| GreaterThan -> (generate_binop generate_relational_exp e2 e1)
+						 ^"cmpq %rcx, %rax\n"
+						 ^"movq $0, %rax\n"
+						 ^"setg %al\n"
+		| LessThan -> (generate_binop generate_relational_exp e2 e1)
+					  ^"cmpq %rcx, %rax\n"
+					  ^"movq $0, %rax\n"
+					  ^"setl %al\n"
+		| GTorEqual -> (generate_binop generate_relational_exp e2 e1)
+					   ^"cmpq %rcx, %rax\n"
+					   ^"movq $0, %rax\n"
+					   ^"setge %al\n"
+		| LTorEqual -> (generate_binop generate_relational_exp e2 e1)
+					   ^"cmpq %rcx, %rax\n"
+					   ^"movq $0, %rax\n"
+					   ^"setle %al\n")
+
+and generate_equality_exp (e: eq_exp) : string = 
+	match e with
+	| RelExp(e1) -> generate_relational_exp e1
+	| EqBinOp(op, e1, e2) -> 
+		(match op with
+		| Equal -> (generate_binop generate_equality_exp e1 e2)
+					^"cmpq %rcx, %rax\n"
+					^"movq $0, %rax\n"
+					^"sete %al\n"
+		| NotEqual -> (generate_binop generate_equality_exp e1 e2)
+					^"cmpq %rcx, %rax\n"
+					^"movq $0, %rax\n"
+					^"setne %al\n")
+
+and generate_logical_and_exp (e: log_and_exp) : string = 
+	match e with
+	| EqExp(e1) -> generate_equality_exp e1
+	| LogAndBinOp(op, e1, e2) -> 
+		(match op with
+		| AND -> (generate_binop generate_logical_and_exp e1 e2)
+				 ^"cmpq $0, %rcx\n"
+				 ^"setne %cl\n"
+				 ^"cmpq $0, %rax\n"
+				 ^"movq $0, %rax\n"
+				 ^"setne %al\n"
+				 ^"andb %cl, %al\n")
+
+and generate_logical_or_exp (e: log_or_exp) : string = 
+	match e with
+	| LogAndExp(e1) -> generate_logical_and_exp e1
+	| LogOrBinOp(op, e1, e2) -> 
+		(match op with
+		| OR -> (generate_binop generate_logical_or_exp e1 e2)
+				^"orq %rcx, %rax\n"
+				^"movq $0, %rax\n"
+				^"setne %al\n")
 ;;
 
 let generate_statement (st: statement) : string =
 	match st with
-	| Return(e) -> 
-		(generate_add_exp e)^"ret\n"
+	| Return(e) -> (generate_logical_or_exp e)^"ret\n"
 ;;
 
 let generate_function (f: fun_decl) : string =
