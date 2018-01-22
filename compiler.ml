@@ -23,37 +23,21 @@ type token =  OpenBrace
 			| LTorEqualToken
 			| GTToken
 			| GTorEqualToken
+			| AssignToken
 			| Keyword of string
 			| Integer of int
 			| Identifier of string
 			| None
 
 (* for AST (parsing) *)
-
-type or_operator = OR 
-type and_operator = AND
-type eq_operator = Equal | NotEqual
-type rel_operator = GreaterThan | LessThan | GTorEqual | LTorEqual
-type add_sub_operator = Add | Subtract
-type mul_div_operator = Multiply | Divide
 type unary_operator = Negation | BitwiseComplement | LogicalNegation
+type binary_operator =  OR | AND | Equal | NotEqual
+						| GreaterThan | LessThan | GTorEqual | LTorEqual
+						| Add | Subtract | Multiply | Divide
 
-type binary_operator = 	  AddSubOp of add_sub_operator 
-						| MulDivOp of mul_div_operator
-						| RelOp of rel_operator
-						| EqOp of eq_operator
-						| AndOp of and_operator
-						| OrOp of or_operator
 
-type log_or_exp = LogOrBinOp of or_operator*log_or_exp*log_or_exp | LogAndExp of log_and_exp
-and log_and_exp = LogAndBinOp of and_operator*log_and_exp*log_and_exp | EqExp of eq_exp
-and eq_exp = EqBinOp of eq_operator*eq_exp*eq_exp | RelExp of rel_exp
-and rel_exp = RelBinOp of rel_operator*rel_exp*rel_exp | AddExp of add_exp
-and add_exp = AddBinOp of add_sub_operator*add_exp*add_exp | MulExp of mul_exp
-and mul_exp = MulBinOp of mul_div_operator*mul_exp*mul_exp | Factor of factor
-and factor = Const of int | UnOp of unary_operator*factor | Parenthetical of log_or_exp
-
-type statement = Return of log_or_exp
+type exp = Assign of string*exp | Var of string | BinOp of binary_operator*exp*exp | UnOp of unary_operator*exp | Const of int
+type statement = Return of exp | Declare of string*(exp option) | Exp of exp
 type fun_decl = Function of string*statement
 type program = Program of fun_decl
 
@@ -110,6 +94,7 @@ let translate_to_token (cl: char list) : token =
 	if s = "/" then ForwardSlash else
 	if s = "<" then LTToken else
 	if s = ">" then GTToken else
+	if s = "=" then AssignToken else
 	if s = "<=" then LTorEqualToken else
 	if s = ">=" then GTorEqualToken else 
 	if s = "&&" then AndToken else
@@ -186,6 +171,7 @@ let print_token (t: token) : string =
 	| LTorEqualToken -> "<="
 	| GTToken -> ">"
 	| GTorEqualToken -> ">="
+	| AssignToken -> "="
 	| Keyword(s) -> "Keyword "^s
 	| Identifier(s) -> "Identifier "^s
 	| Integer(x) -> "Integer "^(string_of_int x)
@@ -207,109 +193,79 @@ let print_tokens (tokens: token list) : unit =
 
 let token_to_binary_operator (t: token) : binary_operator =
 	match t with
-	| Plus -> AddSubOp(Add)
-	| Minus -> AddSubOp(Subtract)
-	| Times -> MulDivOp(Multiply)
-	| ForwardSlash -> MulDivOp(Divide)
-	| GTToken -> RelOp(GreaterThan)
-	| LTToken ->  RelOp(LessThan)
-	| GTorEqualToken -> RelOp(GTorEqual)
-	| LTorEqualToken -> RelOp(LTorEqual)
-	| EqualToken -> EqOp(Equal)
-	| NotEqualToken -> EqOp(NotEqual)
-	| AndToken -> AndOp(AND)
-	| OrToken -> OrOp(OR)
+	| Plus -> Add 
+	| Minus -> Subtract
+	| Times -> Multiply
+	| ForwardSlash -> Divide
+	| GTToken -> GreaterThan
+	| LTToken ->  LessThan
+	| GTorEqualToken -> GTorEqual
+	| LTorEqualToken -> LTorEqual
+	| EqualToken -> Equal
+	| NotEqualToken -> NotEqual
+	| AndToken -> AND
+	| OrToken -> OR
+	| AssignToken -> raise (Parse_exn "This is not a binary operation")
 	| OpenBrace | CloseBrace | OpenParen | CloseParen -> raise (Parse_exn "This is not a binary operation")
 	| Semicolon | BitwiseComplement | LogicalNegation -> raise (Parse_exn "This is not a binary operation")
 	| Keyword(_) | Identifier(_) | Integer(_) | None -> raise (Parse_exn "This is not a binary operation")
 ;;
 
-			
-let or_op_creator (op: binary_operator) (e1: log_or_exp) (e2: log_or_exp) : log_or_exp =
-	match op with
-	| OrOp(f) -> LogOrBinOp(f, e1, e2)
-	| _ -> raise (Parse_exn "Problem with or_op_creator")
-;;
-
-let and_op_creator (op: binary_operator) (e1: log_and_exp) (e2: log_and_exp) : log_and_exp =
-	match op with
-	| AndOp(f) -> LogAndBinOp(f, e1, e2)
-	| _ -> raise (Parse_exn "Problem with and_op_creator")
-;;
-
-let eq_op_creator (op: binary_operator) (e1: eq_exp) (e2: eq_exp) : eq_exp =
-	match op with
-	| EqOp(f) -> EqBinOp(f, e1, e2)
-	| _ -> raise (Parse_exn "Problem with eq_op_creator")
-;;
-
-let rel_op_creator (op: binary_operator) (e1: rel_exp) (e2: rel_exp) : rel_exp =
-	match op with
-	| RelOp(f) -> RelBinOp(f, e1, e2)
-	| _ -> raise (Parse_exn "Problem with rel_op_creator")
-;;
-
-let mul_op_creator (op: binary_operator) (e1: mul_exp) (e2: mul_exp) : mul_exp =
-	match op with
-	| MulDivOp(f) -> MulBinOp(f, e1, e2)
-	| _ -> raise (Parse_exn "Problem with mul_op_creator")
-;;
-
-let add_op_creator (op: binary_operator) (e1: add_exp) (e2: add_exp) : add_exp =
-	match op with
-	| AddSubOp(f) -> AddBinOp(f, e1, e2)
-	| _ -> raise (Parse_exn "Problem with add_op_creator")
-;;
-
-let parse_exp_creator   (parse_lower_level: token list -> 'b*(token list)) 
-						(matching_operators: token list) 
-						(bin_op_creator: binary_operator -> 'a -> 'a -> 'a)
-						(raiser: 'b -> 'a) : (token list -> 'a*(token list)) =
-	let rec f (tokens: token list) : 'a*token list = 
+let parse_exp_creator   (parse_lower_level: token list -> exp*(token list)) 
+						(matching_operators: token list)  =
+	let rec f (tokens: token list) : exp*token list = 
 		let (lower_exp, tl) = parse_lower_level tokens in
-		let rec loop (lst: token list) (acc: 'a) : 'a*(token list) =
+		let rec loop (lst: token list) (acc: exp) : exp*(token list) =
 			match lst with
 			| hd::tl -> 
 				(if List.mem hd matching_operators 
 				then let (new_lower_exp, new_tl) = parse_lower_level tl in
-					loop new_tl (bin_op_creator (token_to_binary_operator hd) acc (raiser new_lower_exp))
+					loop new_tl (BinOp((token_to_binary_operator hd), acc, new_lower_exp))
 				else (acc, hd::tl))
 			| [] -> (acc, []) 
 		in
-		loop tl (raiser lower_exp)
+		loop tl lower_exp
 	in f
 ;;
 
-let rec parse_logical_or_exp (tokens: token list) : log_or_exp*(token list) =
-	let f = parse_exp_creator parse_logical_and_exp [OrToken] or_op_creator (fun (e: log_and_exp) -> LogAndExp(e)) in
+let rec parse_exp (tokens: token list) : exp*(token list) =
+	match tokens with
+	| Identifier(v)::AssignToken::tl -> 
+		let (e, new_tl) = parse_exp tl in
+		(Assign(v, e), new_tl) 
+	| _ -> 
+		let (e, new_tl) = parse_logical_or_exp tokens in
+		(e, new_tl)
+
+and parse_logical_or_exp (tokens: token list) : exp*(token list) =
+	let f = parse_exp_creator parse_logical_and_exp [OrToken] in
 	f tokens
 
-and parse_logical_and_exp (tokens: token list) : log_and_exp*(token list) =
-	let f = parse_exp_creator parse_equality_exp [AndToken] and_op_creator (fun (e: eq_exp) -> EqExp(e)) in
+and parse_logical_and_exp (tokens: token list) : exp*(token list) =
+	let f = parse_exp_creator parse_equality_exp [AndToken] in
 	f tokens
 
-and parse_equality_exp (tokens: token list) : eq_exp*(token list) =
-	let f = parse_exp_creator parse_relational_exp [EqualToken; NotEqualToken] eq_op_creator (fun (e: rel_exp) -> RelExp(e)) in
+and parse_equality_exp (tokens: token list) : exp*(token list) =
+	let f = parse_exp_creator parse_relational_exp [EqualToken; NotEqualToken] in
 	f tokens
 
-and parse_relational_exp (tokens: token list) : rel_exp*(token list) =
-	let f = parse_exp_creator parse_add_exp [GTToken; LTToken; GTorEqualToken; LTorEqualToken] rel_op_creator (fun (e: add_exp) -> AddExp(e)) in
+and parse_relational_exp (tokens: token list) : exp*(token list) =
+	let f = parse_exp_creator parse_add_exp [GTToken; LTToken; GTorEqualToken; LTorEqualToken] in
 	f tokens
 
-and parse_add_exp (tokens: token list) : add_exp*(token list) =
-	let f = parse_exp_creator parse_mul_exp [Plus; Minus] add_op_creator (fun (e: mul_exp) -> MulExp(e)) in
+and parse_add_exp (tokens: token list) : exp*(token list) =
+	let f = parse_exp_creator parse_mul_exp [Plus; Minus] in
 	f tokens
 
-and parse_mul_exp (tokens: token list) : mul_exp*(token list) =
-	let f = parse_exp_creator parse_factor [Times; ForwardSlash] mul_op_creator (fun (e: factor) -> Factor(e)) in
+and parse_mul_exp (tokens: token list) : exp*(token list) =
+	let f = parse_exp_creator parse_factor [Times; ForwardSlash] in
 	f tokens
 
-and parse_factor (tokens: token list) : factor*(token list) =
+and parse_factor (tokens: token list) : exp*(token list) =
 	print_tokens tokens;
-	print_string "parse_factor\n";
 	match tokens with
 	| OpenParen::tl -> (match parse_logical_or_exp tl with
-						| (e, CloseParen::new_tl) -> (Parenthetical(e), new_tl)
+						| (e, CloseParen::new_tl) -> (e, new_tl)
 						| _ -> raise (Parse_exn "Missing expression or ')' in factor"))
 	| Minus::tl -> let (inner_factor, new_tl) = parse_factor tl in
 						(UnOp(Negation, inner_factor), new_tl)
@@ -317,27 +273,42 @@ and parse_factor (tokens: token list) : factor*(token list) =
 						(UnOp(BitwiseComplement, inner_factor), new_tl)
 	| LogicalNegation::tl -> let (inner_factor, new_tl) = parse_factor tl in
 						(UnOp(LogicalNegation, inner_factor), new_tl)
-	| Integer(x)::tl -> print_tokens tl;
-		print_string "parse_factor after\n";
-		(Const(x), tl)
-	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, or BinOp")
+	| Integer(x)::tl -> (Const(x), tl)
+	| Identifier(v)::tl -> (Var(v), tl)
+	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, BinOp, or Var")
 ;;
 
 let parse_statement (tokens: token list) : statement*(token list) = 
 	match tokens with
 	| Keyword(s)::tl when s="return" ->
-		(match parse_logical_or_exp tl with 
+		(match parse_exp tl with 
 		| (e, Semicolon::tl) -> (Return(e), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
-	| _ -> raise (Parse_exn "Missing 'return' keyword")
+	| Keyword(s)::Identifier(v)::Semicolon::tl when s="int" ->	
+		(Declare(v, None), tl)
+	| Keyword(s)::Identifier(v)::AssignToken::tl when s="int" ->
+		(match parse_exp tl with 
+		| (e, Semicolon::tl) -> (Declare(v, Some(e)), tl)
+		| _ -> raise (Parse_exn "Missing semicolon"))
+	| _ -> 
+		(match parse_exp tokens with 
+		| (e, Semicolon::tl) -> (Exp(e), tl)
+		| _ -> raise (Parse_exn "Missing semicolon"))
 ;;
 
-let parse_function (tokens: token list) : fun_decl*(token list) = 
+let parse_function (tokens: token list) : fun_decl*(token list) =
+	let rec helper (tokens: token list) (acc: statement list) : statement list =
+		match parse_statement tokens with
+		| (_, []) -> raise (Parse_exn "Missing '}' in function")
+		| (st, CloseBrace::[]) -> (st::acc) 
+		| (st, tok) -> helper tok (st::acc)
+	in
 	match tokens with
 	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
+		(*(Function(v, List.rev (helper tl [])), [])*)
 		(match parse_statement tl with
-		| (st, CloseBrace::[]) -> (Function(v, st), [])
-		| _ -> raise (Parse_exn "Missing statement or '}' in function"))
+		| (st, CloseBrace::[]) -> (Function (v, st), []) 
+		| _ -> raise (Parse_exn "Missing '}' in function"))
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
 
@@ -352,19 +323,18 @@ let parse (tokens: token list) : program =
 ;;
 
 (* Generate *)
-let generate_binop (generator: 'a -> string) (e1: 'a) (e2: 'a) : string =
-	(generator e1)
+let rec generate_push_pop (e1: 'a) (e2: 'a) : string =
+	(generate_exp e1)
 	^"pushq %rax\n"
-	^(generator e2)
+	^(generate_exp e2)
 	^"popq %rcx\n"
-;;
 
-
-let rec generate_factor (f: factor) : string =
-	match f with 
+and generate_exp (e: exp) : string = 
+	match e with
+	| BinOp(op, e1, e2) -> generate_binop op e1 e2
 	| Const(x) -> Printf.sprintf "movq $%i, %%rax\n" x
 	| UnOp(op, inner_factor) -> 
-		let inner_fac_assembly = generate_factor inner_factor in
+		let inner_fac_assembly = generate_exp inner_factor in
 		let unary_op_assembly =
 			(match op with
 			| Negation -> "neg %rax\n"
@@ -372,97 +342,63 @@ let rec generate_factor (f: factor) : string =
 			| BitwiseComplement -> "not %rax\n") 
 		in
 		inner_fac_assembly^unary_op_assembly
-	| Parenthetical(e) ->  generate_logical_or_exp e
 
-and generate_mul_exp (e: mul_exp) : string =
-	match e with
-	| Factor(f) -> generate_factor f
-	| MulBinOp(op, e1, e2) ->
-		(match op with
-		| Multiply -> (generate_binop generate_mul_exp e1 e2)
-					  ^"imulq %rcx\n"
-		| Divide -> (generate_binop generate_mul_exp e2 e1)
-					^"xor %rdx, %rdx\n"
-					^"idivq %rcx\n")
-
-and generate_add_exp (e: add_exp) : string =
-	match e with
-	| MulExp(e1) -> generate_mul_exp e1
-	| AddBinOp(op, e1, e2) ->
-		(match op with 
-		| Add -> (generate_binop generate_add_exp e1 e2)
-				^"addq %rcx, %rax\n"
-		| Subtract -> (generate_binop generate_add_exp e2 e1)
-						^"subq %rcx, %rax\n")
-
-and generate_relational_exp (e: rel_exp) : string = 
-	match e with
-	| AddExp(e1) -> generate_add_exp e1
-	| RelBinOp(op, e1, e2) ->
-		(match op with
-		| GreaterThan -> (generate_binop generate_relational_exp e2 e1)
-						 ^"cmpq %rcx, %rax\n"
-						 ^"movq $0, %rax\n"
-						 ^"setg %al\n"
-		| LessThan -> (generate_binop generate_relational_exp e2 e1)
-					  ^"cmpq %rcx, %rax\n"
-					  ^"movq $0, %rax\n"
-					  ^"setl %al\n"
-		| GTorEqual -> (generate_binop generate_relational_exp e2 e1)
-					   ^"cmpq %rcx, %rax\n"
-					   ^"movq $0, %rax\n"
-					   ^"setge %al\n"
-		| LTorEqual -> (generate_binop generate_relational_exp e2 e1)
-					   ^"cmpq %rcx, %rax\n"
-					   ^"movq $0, %rax\n"
-					   ^"setle %al\n")
-
-and generate_equality_exp (e: eq_exp) : string = 
-	match e with
-	| RelExp(e1) -> generate_relational_exp e1
-	| EqBinOp(op, e1, e2) -> 
-		(match op with
-		| Equal -> (generate_binop generate_equality_exp e1 e2)
-					^"cmpq %rcx, %rax\n"
-					^"movq $0, %rax\n"
-					^"sete %al\n"
-		| NotEqual -> (generate_binop generate_equality_exp e1 e2)
-					^"cmpq %rcx, %rax\n"
-					^"movq $0, %rax\n"
-					^"setne %al\n")
-
-and generate_logical_and_exp (e: log_and_exp) : string = 
-	match e with
-	| EqExp(e1) -> generate_equality_exp e1
-	| LogAndBinOp(op, e1, e2) -> 
-		(match op with
-		| AND -> (generate_binop generate_logical_and_exp e1 e2)
-				 ^"cmpq $0, %rcx\n"
-				 ^"setne %cl\n"
-				 ^"cmpq $0, %rax\n"
-				 ^"movq $0, %rax\n"
-				 ^"setne %al\n"
-				 ^"andb %cl, %al\n")
-
-and generate_logical_or_exp (e: log_or_exp) : string = 
-	match e with
-	| LogAndExp(e1) -> generate_logical_and_exp e1
-	| LogOrBinOp(op, e1, e2) -> 
-		(match op with
-		| OR -> (generate_binop generate_logical_or_exp e1 e2)
-				^"orq %rcx, %rax\n"
+and generate_binop (op: binary_operator) (e1: exp) (e2: exp) = 
+	match op with
+	| Multiply -> (generate_push_pop e1 e2)
+				  ^"imulq %rcx\n"
+	| Divide -> (generate_push_pop e2 e1)
+				^"xor %rdx, %rdx\n"
+				^"idivq %rcx\n"
+	| Add -> (generate_push_pop e1 e2)
+			 ^"addq %rcx, %rax\n"
+	| Subtract -> (generate_push_pop e2 e1)
+					^"subq %rcx, %rax\n"
+	| GreaterThan -> (generate_push_pop e2 e1)
+					 ^"cmpq %rcx, %rax\n"
+					 ^"movq $0, %rax\n"
+					 ^"setg %al\n"
+	| LessThan -> (generate_push_pop e2 e1)
+				  ^"cmpq %rcx, %rax\n"
+				  ^"movq $0, %rax\n"
+				  ^"setl %al\n"
+	| GTorEqual -> (generate_push_pop e2 e1)
+				   ^"cmpq %rcx, %rax\n"
+				   ^"movq $0, %rax\n"
+				   ^"setge %al\n"
+	| LTorEqual -> (generate_push_pop e2 e1)
+				   ^"cmpq %rcx, %rax\n"
+				   ^"movq $0, %rax\n"
+				   ^"setle %al\n"
+	| Equal -> (generate_push_pop e1 e2)
+				^"cmpq %rcx, %rax\n"
 				^"movq $0, %rax\n"
-				^"setne %al\n")
-;;
+				^"sete %al\n"
+	| NotEqual -> (generate_push_pop e1 e2)
+				^"cmpq %rcx, %rax\n"
+				^"movq $0, %rax\n"
+				^"setne %al\n"
+	| AND -> (generate_push_pop e1 e2)
+			 ^"cmpq $0, %rcx\n"
+			 ^"setne %cl\n"
+			 ^"cmpq $0, %rax\n"
+			 ^"movq $0, %rax\n"
+			 ^"setne %al\n"
+			 ^"andb %cl, %al\n"
+	| OR -> (generate_push_pop e1 e2)
+			^"orq %rcx, %rax\n"
+			^"movq $0, %rax\n"
+			^"setne %al\n"
 
 let generate_statement (st: statement) : string =
 	match st with
-	| Return(e) -> (generate_logical_or_exp e)^"ret\n"
+	| Return(e) -> (generate_exp e)^"ret\n"
 ;;
 
 let generate_function (f: fun_decl) : string =
 	match f with
-	| Function(name, st) -> (Printf.sprintf ".globl %s\n%s:\n" name name) ^ (generate_statement st)
+	| Function(name, st) -> 
+		(Printf.sprintf ".globl %s\n%s:\n" name name) ^ (generate_statement st)
 ;;
 
 let generate (ast: program) : string = 
