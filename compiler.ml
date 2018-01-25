@@ -1,5 +1,6 @@
 open Str;;
 open List;;
+open Map;;
 
 (*Type definitions*)
 
@@ -38,8 +39,12 @@ type binary_operator =  OR | AND | Equal | NotEqual
 
 type exp = Assign of string*exp | Var of string | BinOp of binary_operator*exp*exp | UnOp of unary_operator*exp | Const of int
 type statement = Return of exp | Declare of string*(exp option) | Exp of exp
-type fun_decl = Function of string*statement
+type fun_decl = Function of string*(statement list)
 type program = Program of fun_decl
+
+(* Generating assembly *)
+module V = Map.Make(String);;
+type var_map = (int V.t)*int
 
 exception Parse_exn of string
 exception Generate_exn of string
@@ -298,17 +303,16 @@ let parse_statement (tokens: token list) : statement*(token list) =
 
 let parse_function (tokens: token list) : fun_decl*(token list) =
 	let rec helper (tokens: token list) (acc: statement list) : statement list =
-		match parse_statement tokens with
-		| (_, []) -> raise (Parse_exn "Missing '}' in function")
-		| (st, CloseBrace::[]) -> (st::acc) 
-		| (st, tok) -> helper tok (st::acc)
+		match tokens with
+		| CloseBrace::[] ->	Return(Const(0))::acc
+		| _ -> (match parse_statement tokens with
+				| (_, []) -> raise (Parse_exn "Missing '}' in function")
+				| (st, CloseBrace::[]) -> (st::acc) 
+				| (st, tok) -> helper tok (st::acc))
 	in
 	match tokens with
 	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
-		(*(Function(v, List.rev (helper tl [])), [])*)
-		(match parse_statement tl with
-		| (st, CloseBrace::[]) -> (Function (v, st), []) 
-		| _ -> raise (Parse_exn "Missing '}' in function"))
+		(Function(v, List.rev (helper tl [])), [])
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
 
@@ -323,18 +327,18 @@ let parse (tokens: token list) : program =
 ;;
 
 (* Generate *)
-let rec generate_push_pop (e1: 'a) (e2: 'a) : string =
-	(generate_exp e1)
+let rec generate_push_pop (e1: exp) (e2: exp) (vars: var_map): string =
+	(generate_exp e1 vars)
 	^"pushq %rax\n"
-	^(generate_exp e2)
+	^(generate_exp e2 vars)
 	^"popq %rcx\n"
 
-and generate_exp (e: exp) : string = 
+and generate_exp (e: exp) (vars: var_map): string = 
 	match e with
-	| BinOp(op, e1, e2) -> generate_binop op e1 e2
+	| BinOp(op, e1, e2) -> generate_binop op e1 e2 vars
 	| Const(x) -> Printf.sprintf "movq $%i, %%rax\n" x
 	| UnOp(op, inner_factor) -> 
-		let inner_fac_assembly = generate_exp inner_factor in
+		let inner_fac_assembly = generate_exp inner_factor vars in
 		let unary_op_assembly =
 			(match op with
 			| Negation -> "neg %rax\n"
@@ -342,63 +346,101 @@ and generate_exp (e: exp) : string =
 			| BitwiseComplement -> "not %rax\n") 
 		in
 		inner_fac_assembly^unary_op_assembly
+	| Assign(v, e1) -> 
+		let offset = V.find v (fst vars) in
+		let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" offset in
+		(generate_exp e1 vars)
+		^assign
+	| Var(v) -> 
+		let offset = V.find v (fst vars) in
+		Printf.sprintf "movq %i(%%rbp), %%rax\n" offset
 
-and generate_binop (op: binary_operator) (e1: exp) (e2: exp) = 
+
+and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (vars: var_map) : string = 
 	match op with
-	| Multiply -> (generate_push_pop e1 e2)
+	| Multiply -> (generate_push_pop e1 e2 vars)
 				  ^"imulq %rcx\n"
-	| Divide -> (generate_push_pop e2 e1)
+	| Divide -> (generate_push_pop e2 e1 vars)
 				^"xor %rdx, %rdx\n"
 				^"idivq %rcx\n"
-	| Add -> (generate_push_pop e1 e2)
+	| Add -> (generate_push_pop e1 e2 vars)
 			 ^"addq %rcx, %rax\n"
-	| Subtract -> (generate_push_pop e2 e1)
+	| Subtract -> (generate_push_pop e2 e1 vars)
 					^"subq %rcx, %rax\n"
-	| GreaterThan -> (generate_push_pop e2 e1)
+	| GreaterThan -> (generate_push_pop e2 e1 vars)
 					 ^"cmpq %rcx, %rax\n"
 					 ^"movq $0, %rax\n"
 					 ^"setg %al\n"
-	| LessThan -> (generate_push_pop e2 e1)
+	| LessThan -> (generate_push_pop e2 e1 vars)
 				  ^"cmpq %rcx, %rax\n"
 				  ^"movq $0, %rax\n"
 				  ^"setl %al\n"
-	| GTorEqual -> (generate_push_pop e2 e1)
+	| GTorEqual -> (generate_push_pop e2 e1 vars)
 				   ^"cmpq %rcx, %rax\n"
 				   ^"movq $0, %rax\n"
 				   ^"setge %al\n"
-	| LTorEqual -> (generate_push_pop e2 e1)
+	| LTorEqual -> (generate_push_pop e2 e1 vars)
 				   ^"cmpq %rcx, %rax\n"
 				   ^"movq $0, %rax\n"
 				   ^"setle %al\n"
-	| Equal -> (generate_push_pop e1 e2)
+	| Equal -> (generate_push_pop e1 e2 vars)
 				^"cmpq %rcx, %rax\n"
 				^"movq $0, %rax\n"
 				^"sete %al\n"
-	| NotEqual -> (generate_push_pop e1 e2)
+	| NotEqual -> (generate_push_pop e1 e2 vars)
 				^"cmpq %rcx, %rax\n"
 				^"movq $0, %rax\n"
 				^"setne %al\n"
-	| AND -> (generate_push_pop e1 e2)
+	| AND -> (generate_push_pop e1 e2 vars)
 			 ^"cmpq $0, %rcx\n"
 			 ^"setne %cl\n"
 			 ^"cmpq $0, %rax\n"
 			 ^"movq $0, %rax\n"
 			 ^"setne %al\n"
 			 ^"andb %cl, %al\n"
-	| OR -> (generate_push_pop e1 e2)
+	| OR -> (generate_push_pop e1 e2 vars)
 			^"orq %rcx, %rax\n"
 			^"movq $0, %rax\n"
 			^"setne %al\n"
+;;
 
-let generate_statement (st: statement) : string =
+let generate_statement (st: statement) (vars: var_map): string*var_map =
 	match st with
-	| Return(e) -> (generate_exp e)^"ret\n"
+	| Return(e) -> ((generate_exp e vars)
+				   ^"movq %rbp, %rsp\n"
+				   ^"popq %rbp\n"
+				   ^"ret\n",
+					vars)
+	| Declare (v, e) -> 
+		if V.mem v (fst vars) then 
+			let s = Printf.sprintf "variable %s declared twice" v in
+			raise (Generate_exn s)
+		else
+			let evaluate = match e with
+					| None -> "movq $0, %rax\n"
+					| Some e1 -> generate_exp e1 vars
+			in 
+			let (m, offset) = vars in
+			let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" offset in
+			(evaluate^assign, (V.add v offset m, offset-8))
+	| Exp(e) -> (generate_exp e vars, vars)
+
 ;;
 
 let generate_function (f: fun_decl) : string =
+	let rec helper (sts: statement list) (acc: string) (vars: var_map): string =
+		match sts with
+		| [] -> acc
+		| hd::tl -> 
+			let (s, new_vars) = generate_statement hd vars in
+			helper tl (acc^s) new_vars
+	in
 	match f with
-	| Function(name, st) -> 
-		(Printf.sprintf ".globl %s\n%s:\n" name name) ^ (generate_statement st)
+	| Function(name, sts) -> 
+		(Printf.sprintf ".globl %s\n%s:\n" name name) 
+		^"pushq %rbp\n"
+		^"movq %rsp, %rbp\n"
+		^(helper sts "" (V.empty, -8))
 ;;
 
 let generate (ast: program) : string = 
