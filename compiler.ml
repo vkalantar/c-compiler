@@ -5,25 +5,11 @@ open Map;;
 (*Type definitions*)
 
 (* for tokens (lexing) *)
-type token =  OpenBrace
-			| CloseBrace
-			| OpenParen
-			| CloseParen
-			| Semicolon
-			| Minus
-			| BitwiseComplement
-			| LogicalNegation
-			| Plus
-			| Times
-			| ForwardSlash
-			| AndToken
-			| OrToken
-			| EqualToken
-			| NotEqualToken
-			| LTToken
-			| LTorEqualToken
-			| GTToken
-			| GTorEqualToken
+type token =  OpenBrace | CloseBrace | OpenParen | CloseParen
+			| Semicolon | BitwiseComplement | LogicalNegation
+			| Plus | Minus | Times | ForwardSlash
+			| AndToken | OrToken | EqualToken | NotEqualToken
+			| LTToken | LTorEqualToken | GTToken | GTorEqualToken
 			| AssignToken
 			| Keyword of string
 			| Integer of int
@@ -38,13 +24,16 @@ type binary_operator =  OR | AND | Equal | NotEqual
 
 
 type exp = Assign of string*exp | Var of string | BinOp of binary_operator*exp*exp | UnOp of unary_operator*exp | Const of int
-type statement = Return of exp | Declare of string*(exp option) | Exp of exp
+type statement = Return of exp | Declare of string*(exp option) | Exp of exp | If of exp*(statement list)*(statement list)
 type fun_decl = Function of string*(statement list)
 type program = Program of fun_decl
 
 (* Generating assembly *)
 module V = Map.Make(String);;
-type var_map = (int V.t)*int
+type context = 
+	{ var_map : int V.t;
+	  offset  : int
+	}
 
 exception Parse_exn of string
 exception Generate_exn of string
@@ -84,7 +73,7 @@ let to_list (s:string) : char list =
 
 let translate_to_token (cl: char list) : token = 
 	let s = String.concat "" (List.map (String.make 1) cl) in 
-	let keywords = ["int"; "return"] in
+	let keywords = ["int"; "return"; "if"; "else"] in
 	if s = ""  then None else
 	if s = "{" then OpenBrace else
 	if s = "}" then CloseBrace else
@@ -283,7 +272,21 @@ and parse_factor (tokens: token list) : exp*(token list) =
 	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, BinOp, or Var")
 ;;
 
-let parse_statement (tokens: token list) : statement*(token list) = 
+let rec parse_if (tokens: token list) : statement*(token list) = 
+	match parse_exp tokens with
+		| (e, CloseParen::OpenBrace::tl) -> 
+			(match parse_statement_list tl with
+			| (true_branch, Keyword(a)::Keyword(b)::OpenParen::new_tl) when (a="else" && b="if") -> 
+					let (st, final_tl) = parse_if new_tl in
+					(If(e, true_branch, [st]), final_tl)
+			| (true_branch, Keyword(a)::OpenBrace::new_tl) when a="else" ->
+					let (false_branch, final_tl) = parse_statement_list new_tl in
+					(If(e, true_branch, false_branch), final_tl)
+			| (true_branch, new_tl) -> (If(e, true_branch, []), new_tl))
+		| _ -> raise (Parse_exn "Missing a '(' after the condition.")
+
+
+and parse_statement (tokens: token list) : statement*(token list) = 
 	match tokens with
 	| Keyword(s)::tl when s="return" ->
 		(match parse_exp tl with 
@@ -295,24 +298,32 @@ let parse_statement (tokens: token list) : statement*(token list) =
 		(match parse_exp tl with 
 		| (e, Semicolon::tl) -> (Declare(v, Some(e)), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
+	| Keyword(s)::OpenParen::tl when s="if" -> parse_if tl
 	| _ -> 
 		(match parse_exp tokens with 
 		| (e, Semicolon::tl) -> (Exp(e), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
-;;
 
-let parse_function (tokens: token list) : fun_decl*(token list) =
-	let rec helper (tokens: token list) (acc: statement list) : statement list =
+and parse_statement_list (tokens: token list) : (statement list)*(token list) =
+	let rec helper (tokens: token list) (acc: statement list) : (statement list)*(token list) =
 		match tokens with
-		| CloseBrace::[] ->	Return(Const(0))::acc
+		| CloseBrace::[] ->	(Return(Const(0))::acc, [])
 		| _ -> (match parse_statement tokens with
 				| (_, []) -> raise (Parse_exn "Missing '}' in function")
-				| (st, CloseBrace::[]) -> (st::acc) 
+				| (st, CloseBrace::tl) -> (st::acc, tl)
 				| (st, tok) -> helper tok (st::acc))
 	in
+	let (tok, tl) = helper tokens [] in
+	(List.rev tok, tl)
+;;
+
+
+let parse_function (tokens: token list) : fun_decl*(token list) =
 	match tokens with
 	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
-		(Function(v, List.rev (helper tl [])), [])
+		(match parse_statement_list tl with
+		| (st_list, []) -> (Function(v, st_list), [])
+		| _ -> raise (Parse_exn "Extra characters after end of function"))
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
 
@@ -327,18 +338,18 @@ let parse (tokens: token list) : program =
 ;;
 
 (* Generate *)
-let rec generate_push_pop (e1: exp) (e2: exp) (vars: var_map): string =
-	(generate_exp e1 vars)
+let rec generate_push_pop (e1: exp) (e2: exp) (ctx: context): string =
+	(generate_exp e1 ctx)
 	^"pushq %rax\n"
-	^(generate_exp e2 vars)
+	^(generate_exp e2 ctx)
 	^"popq %rcx\n"
 
-and generate_exp (e: exp) (vars: var_map): string = 
+and generate_exp (e: exp) (ctx: context): string = 
 	match e with
-	| BinOp(op, e1, e2) -> generate_binop op e1 e2 vars
+	| BinOp(op, e1, e2) -> generate_binop op e1 e2 ctx
 	| Const(x) -> Printf.sprintf "movq $%i, %%rax\n" x
 	| UnOp(op, inner_factor) -> 
-		let inner_fac_assembly = generate_exp inner_factor vars in
+		let inner_fac_assembly = generate_exp inner_factor ctx in
 		let unary_op_assembly =
 			(match op with
 			| Negation -> "neg %rax\n"
@@ -347,100 +358,117 @@ and generate_exp (e: exp) (vars: var_map): string =
 		in
 		inner_fac_assembly^unary_op_assembly
 	| Assign(v, e1) -> 
-		let offset = V.find v (fst vars) in
+		let offset = V.find v ctx.var_map in
 		let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" offset in
-		(generate_exp e1 vars)
+		(generate_exp e1 ctx)
 		^assign
 	| Var(v) -> 
-		let offset = V.find v (fst vars) in
+		let offset = V.find v ctx.var_map in
 		Printf.sprintf "movq %i(%%rbp), %%rax\n" offset
 
 
-and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (vars: var_map) : string = 
+and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) : string = 
 	match op with
-	| Multiply -> (generate_push_pop e1 e2 vars)
+	| Multiply -> (generate_push_pop e1 e2 ctx)
 				  ^"imulq %rcx\n"
-	| Divide -> (generate_push_pop e2 e1 vars)
+	| Divide -> (generate_push_pop e2 e1 ctx)
 				^"xor %rdx, %rdx\n"
 				^"idivq %rcx\n"
-	| Add -> (generate_push_pop e1 e2 vars)
+	| Add -> (generate_push_pop e1 e2 ctx)
 			 ^"addq %rcx, %rax\n"
-	| Subtract -> (generate_push_pop e2 e1 vars)
+	| Subtract -> (generate_push_pop e2 e1 ctx)
 					^"subq %rcx, %rax\n"
-	| GreaterThan -> (generate_push_pop e2 e1 vars)
+	| GreaterThan -> (generate_push_pop e2 e1 ctx)
 					 ^"cmpq %rcx, %rax\n"
 					 ^"movq $0, %rax\n"
 					 ^"setg %al\n"
-	| LessThan -> (generate_push_pop e2 e1 vars)
+	| LessThan -> (generate_push_pop e2 e1 ctx)
 				  ^"cmpq %rcx, %rax\n"
 				  ^"movq $0, %rax\n"
 				  ^"setl %al\n"
-	| GTorEqual -> (generate_push_pop e2 e1 vars)
+	| GTorEqual -> (generate_push_pop e2 e1 ctx)
 				   ^"cmpq %rcx, %rax\n"
 				   ^"movq $0, %rax\n"
 				   ^"setge %al\n"
-	| LTorEqual -> (generate_push_pop e2 e1 vars)
+	| LTorEqual -> (generate_push_pop e2 e1 ctx)
 				   ^"cmpq %rcx, %rax\n"
 				   ^"movq $0, %rax\n"
 				   ^"setle %al\n"
-	| Equal -> (generate_push_pop e1 e2 vars)
+	| Equal -> (generate_push_pop e1 e2 ctx)
 				^"cmpq %rcx, %rax\n"
 				^"movq $0, %rax\n"
 				^"sete %al\n"
-	| NotEqual -> (generate_push_pop e1 e2 vars)
+	| NotEqual -> (generate_push_pop e1 e2 ctx)
 				^"cmpq %rcx, %rax\n"
 				^"movq $0, %rax\n"
 				^"setne %al\n"
-	| AND -> (generate_push_pop e1 e2 vars)
+	| AND -> (generate_push_pop e1 e2 ctx)
 			 ^"cmpq $0, %rcx\n"
 			 ^"setne %cl\n"
 			 ^"cmpq $0, %rax\n"
 			 ^"movq $0, %rax\n"
 			 ^"setne %al\n"
 			 ^"andb %cl, %al\n"
-	| OR -> (generate_push_pop e1 e2 vars)
+	| OR -> (generate_push_pop e1 e2 ctx)
 			^"orq %rcx, %rax\n"
 			^"movq $0, %rax\n"
 			^"setne %al\n"
 ;;
 
-let generate_statement (st: statement) (vars: var_map): string*var_map =
+let rec generate_statement (st: statement) (ctx: context) (j: int) : string*context*int =
 	match st with
-	| Return(e) -> ((generate_exp e vars)
+	| Return(e) -> ((generate_exp e ctx)
 				   ^"movq %rbp, %rsp\n"
 				   ^"popq %rbp\n"
 				   ^"ret\n",
-					vars)
+					ctx, j)
 	| Declare (v, e) -> 
-		if V.mem v (fst vars) then 
+		if V.mem v ctx.var_map then 
 			let s = Printf.sprintf "variable %s declared twice" v in
 			raise (Generate_exn s)
 		else
 			let evaluate = match e with
 					| None -> "movq $0, %rax\n"
-					| Some e1 -> generate_exp e1 vars
+					| Some e1 -> generate_exp e1 ctx
 			in 
-			let (m, offset) = vars in
-			let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" offset in
-			(evaluate^assign, (V.add v offset m, offset-8))
-	| Exp(e) -> (generate_exp e vars, vars)
+			let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" ctx.offset in
+			let new_ctx = {	var_map = V.add v ctx. offset ctx.var_map; 
+							offset = ctx.offset-8
+						}
+			in
+			(evaluate^assign, new_ctx, j)
+	| Exp(e) -> (generate_exp e ctx, ctx, j)
+	| If(cond, true_st, false_st) ->
+		let (true_code, true_ctx, new_j) = generate_statement_list true_st ctx j in
+		let (false_code, false_ctx, final_j) = generate_statement_list false_st true_ctx new_j in
+		((generate_exp cond ctx)
+		^"cmpq $0, %rax\n"
+		^(Printf.sprintf "je .L%i\n" final_j)
+		^true_code
+		^(Printf.sprintf "je .L%i\n" (final_j+1))
+		^(Printf.sprintf ".L%i:\n" final_j)
+		^false_code
+		^(Printf.sprintf ".L%i:\n" (final_j+1)), ctx, final_j+2)
 
+and generate_statement_list (sts: statement list) (ctx: context) (j: int) : string*context*int = 
+	let rec helper (sts: statement list) (acc: string) (ctx: context) (j: int): string*context*int =
+		match sts with
+		| [] -> (acc, ctx, j)
+		| hd::tl -> 
+			let (s, new_ctx, new_j) = generate_statement hd ctx j in
+			helper tl (acc^s) new_ctx new_j
+	in
+	helper sts "" ctx j
 ;;
 
-let generate_function (f: fun_decl) : string =
-	let rec helper (sts: statement list) (acc: string) (vars: var_map): string =
-		match sts with
-		| [] -> acc
-		| hd::tl -> 
-			let (s, new_vars) = generate_statement hd vars in
-			helper tl (acc^s) new_vars
-	in
+let generate_function (f: fun_decl) : string = 
 	match f with
 	| Function(name, sts) -> 
+		let (statements, ctx, j) = generate_statement_list sts {var_map = V.empty; offset =  -8} 0 in
 		(Printf.sprintf ".globl %s\n%s:\n" name name) 
 		^"pushq %rbp\n"
 		^"movq %rsp, %rbp\n"
-		^(helper sts "" (V.empty, -8))
+		^statements
 ;;
 
 let generate (ast: program) : string = 
