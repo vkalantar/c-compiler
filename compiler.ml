@@ -23,10 +23,10 @@ type binary_operator =  OR | AND | Equal | NotEqual
 						| Add | Subtract | Multiply | Divide
 
 
-type exp = Assign of string*exp | Var of string | BinOp of binary_operator*exp*exp | UnOp of unary_operator*exp | Const of int
+type exp = Call of string*(exp list) | Assign of string*exp | Var of string | BinOp of binary_operator*exp*exp | UnOp of unary_operator*exp | Const of int
 type statement = Return of exp | Declare of string*(exp option) | Exp of exp | If of exp*(statement list)*(statement list)
 type fun_decl = Function of string*(statement list)
-type program = Program of fun_decl
+type program = Program of fun_decl list 
 
 (* Generating assembly *)
 module V = Map.Make(String);;
@@ -222,7 +222,19 @@ let parse_exp_creator   (parse_lower_level: token list -> exp*(token list))
 	in f
 ;;
 
-let rec parse_exp (tokens: token list) : exp*(token list) =
+let rec parse_exp_list (tokens: token list) : (exp list)*token list = 
+	let rec helper (tokens: token list) (acc: exp list) : (exp list)*(token list) =
+		match tokens with
+		| CloseParen::tl ->	(acc, tl)
+		| _ -> (match parse_exp tokens with
+				| (_, []) -> raise (Parse_exn "Missing ')' in function call")
+				| (e, CloseParen::tl) -> (e::acc, tl)
+				| (e, tok) -> helper tok (e::acc))
+	in
+	let (params, tl) = helper tokens [] in
+	(List.rev params, tl)
+
+and parse_exp (tokens: token list) : exp*(token list) =
 	match tokens with
 	| Identifier(v)::AssignToken::tl -> 
 		let (e, new_tl) = parse_exp tl in
@@ -264,10 +276,12 @@ and parse_factor (tokens: token list) : exp*(token list) =
 	| Minus::tl -> let (inner_factor, new_tl) = parse_factor tl in
 						(UnOp(Negation, inner_factor), new_tl)
 	| BitwiseComplement::tl -> let (inner_factor, new_tl) = parse_factor tl in
-						(UnOp(BitwiseComplement, inner_factor), new_tl)
+								(UnOp(BitwiseComplement, inner_factor), new_tl)
 	| LogicalNegation::tl -> let (inner_factor, new_tl) = parse_factor tl in
-						(UnOp(LogicalNegation, inner_factor), new_tl)
+								(UnOp(LogicalNegation, inner_factor), new_tl)
 	| Integer(x)::tl -> (Const(x), tl)
+	| Identifier(v)::OpenParen::tl -> let (params, new_tl) = parse_exp_list tl in
+										(Call(v, params), new_tl)
 	| Identifier(v)::tl -> (Var(v), tl)
 	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, BinOp, or Var")
 ;;
@@ -313,24 +327,28 @@ and parse_statement_list (tokens: token list) : (statement list)*(token list) =
 				| (st, CloseBrace::tl) -> (st::acc, tl)
 				| (st, tok) -> helper tok (st::acc))
 	in
-	let (tok, tl) = helper tokens [] in
-	(List.rev tok, tl)
+	let (sts, tl) = helper tokens [] in
+	(List.rev sts, tl)
 ;;
 
 
 let parse_function (tokens: token list) : fun_decl*(token list) =
 	match tokens with
 	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
-		(match parse_statement_list tl with
-		| (st_list, []) -> (Function(v, st_list), [])
-		| _ -> raise (Parse_exn "Extra characters after end of function"))
+		let (st_list, new_tl) = parse_statement_list tl in 
+		(Function(v, st_list), new_tl)
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
 
 let parse_program (tokens: token list) : program*(token list) = 
-	match parse_function tokens with
-	| (f, []) -> (Program(f), [])
-	| _ -> raise (Parse_exn "Problem in parse_program")
+	let rec helper (t: token list) (acc: fun_decl list) : (fun_decl list)*(token list) =
+		match t with 
+		| [] -> (acc, [])
+		| _ -> let (f, tl) = parse_function t in
+				helper tl (f::acc) 
+	in
+	let (functions, tl) = helper tokens [] in
+	(Program(List.rev functions), tl)
 ;;
 
 let parse (tokens: token list) : program =
@@ -343,6 +361,14 @@ let rec generate_push_pop (e1: exp) (e2: exp) (ctx: context): string =
 	^"pushq %rax\n"
 	^(generate_exp e2 ctx)
 	^"popq %rcx\n"
+
+and generate_push_params (params: exp list) (ctx: context) : string = 
+	let rec helper (p: exp list) (acc: string) : string =
+		match p with
+		| [] -> acc
+		| hd::tl -> helper tl ((generate_exp hd ctx)^"pushq %rax"^acc)
+	in
+	helper params ""
 
 and generate_exp (e: exp) (ctx: context): string = 
 	match e with
@@ -365,6 +391,22 @@ and generate_exp (e: exp) (ctx: context): string =
 	| Var(v) -> 
 		let offset = V.find v ctx.var_map in
 		Printf.sprintf "movq %i(%%rbp), %%rax\n" offset
+	| Call(v, params) ->
+		 "pushq %rax\n"
+		^"pushq %rdx\n"
+		^"pushq %r8\n"
+		^"pushq %r9\n"
+		^"pushq %r10\n"
+		^"pushq %r11\n"
+		^(generate_push_params params ctx)
+		^(Printf.sprintf "call %s\n" v)
+		^"addq $48, %rsp"
+		^"popq %rax\n"
+		^"popq %rdx\n"
+		^"popq %r8\n"
+		^"popq %r9\n"
+		^"popq %r10\n"
+		^"popq %r11\n"
 
 
 and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) : string = 
@@ -445,7 +487,7 @@ let rec generate_statement (st: statement) (ctx: context) (j: int) : string*cont
 		^"cmpq $0, %rax\n"
 		^(Printf.sprintf "je .L%i\n" final_j)
 		^true_code
-		^(Printf.sprintf "je .L%i\n" (final_j+1))
+		^(Printf.sprintf "jmp .L%i\n" (final_j+1))
 		^(Printf.sprintf ".L%i:\n" final_j)
 		^false_code
 		^(Printf.sprintf ".L%i:\n" (final_j+1)), ctx, final_j+2)
@@ -461,19 +503,28 @@ and generate_statement_list (sts: statement list) (ctx: context) (j: int) : stri
 	helper sts "" ctx j
 ;;
 
-let generate_function (f: fun_decl) : string = 
+let generate_function (f: fun_decl) (j: int) : string*int = 
 	match f with
 	| Function(name, sts) -> 
-		let (statements, ctx, j) = generate_statement_list sts {var_map = V.empty; offset =  -8} 0 in
-		(Printf.sprintf ".globl %s\n%s:\n" name name) 
+		let (statements, ctx, new_j) = generate_statement_list sts {var_map = V.empty; offset =  -8} j in
+		((Printf.sprintf ".globl %s\n%s:\n" name name) 
 		^"pushq %rbp\n"
 		^"movq %rsp, %rbp\n"
-		^statements
+		^statements, new_j)
 ;;
+
+let generate_function_list (fs: fun_decl list) : string = 
+	let rec helper (fs: fun_decl list) (acc: string) (j: int) : string*int = 
+		match fs with
+		| [] -> (acc, j)
+		| hd::tl -> let (f, new_j) = generate_function hd j in
+					helper tl (acc^f) new_j
+	in
+	fst (helper fs "" 0)
 
 let generate (ast: program) : string = 
 	match ast with
-	| Program(f) -> generate_function f
+	| Program(fs) -> generate_function_list fs
 ;;
 
 
