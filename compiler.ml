@@ -10,6 +10,7 @@ type token =  OpenBrace | CloseBrace | OpenParen | CloseParen
 			| Plus | Minus | Times | ForwardSlash
 			| AndToken | OrToken | EqualToken | NotEqualToken
 			| LTToken | LTorEqualToken | GTToken | GTorEqualToken
+			| Colon | QuestionMark
 			| AssignToken
 			| Keyword of string
 			| Integer of int
@@ -23,9 +24,16 @@ type binary_operator =  OR | AND | Equal | NotEqual
 						| Add | Subtract | Multiply | Divide
 
 
-type exp = Call of string*(exp list) | Assign of string*exp | Var of string | BinOp of binary_operator*exp*exp | UnOp of unary_operator*exp | Const of int
-type statement = Return of exp | Declare of string*(exp option) | Exp of exp | If of exp*(statement list)*(statement list)
-type fun_decl = Function of string*(statement list)
+type exp =    Conditional of exp*exp*exp
+			| Assign of string*exp
+			| Var of string 
+			| BinOp of binary_operator*exp*exp 
+			| UnOp of unary_operator*exp 
+			| Const of int
+type statement = Return of exp | Exp of exp | If of exp*statement*(statement option)
+type declaration = Declare of string*(exp option)
+type block_item = Statement of statement | Declaration of declaration
+type fun_decl = Function of string*(block_item list)
 type program = Program of fun_decl list 
 
 (* Generating assembly *)
@@ -89,6 +97,8 @@ let translate_to_token (cl: char list) : token =
 	if s = "<" then LTToken else
 	if s = ">" then GTToken else
 	if s = "=" then AssignToken else
+	if s = ":" then Colon else
+	if s = "?" then QuestionMark else
 	if s = "<=" then LTorEqualToken else
 	if s = ">=" then GTorEqualToken else 
 	if s = "&&" then AndToken else
@@ -118,7 +128,7 @@ let symbols_to_tokens (symbols: char list) : token list =
 ;;
 
 let rec lex_helper (input: char list) (word_acc: char list) (symbol_acc: char list) (token_acc: token list) : token list = 
-	let symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/'; '<'; '>'; '&'; '|'; '=' ] in
+	let symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/'; '<'; '>'; '&'; '|'; '='; ':'; '?' ] in
 	let whitespaces = [' '; '\n'; '\r'; '\x0c'; '\t'] in
 	match input with
 	| [] -> token_acc
@@ -166,6 +176,8 @@ let print_token (t: token) : string =
 	| GTToken -> ">"
 	| GTorEqualToken -> ">="
 	| AssignToken -> "="
+	| Colon -> ":"
+	| QuestionMark -> "?"
 	| Keyword(s) -> "Keyword "^s
 	| Identifier(s) -> "Identifier "^s
 	| Integer(x) -> "Integer "^(string_of_int x)
@@ -199,7 +211,7 @@ let token_to_binary_operator (t: token) : binary_operator =
 	| NotEqualToken -> NotEqual
 	| AndToken -> AND
 	| OrToken -> OR
-	| AssignToken -> raise (Parse_exn "This is not a binary operation")
+	| AssignToken | Colon | QuestionMark -> raise (Parse_exn "This is not a binary operation")
 	| OpenBrace | CloseBrace | OpenParen | CloseParen -> raise (Parse_exn "This is not a binary operation")
 	| Semicolon | BitwiseComplement | LogicalNegation -> raise (Parse_exn "This is not a binary operation")
 	| Keyword(_) | Identifier(_) | Integer(_) | None -> raise (Parse_exn "This is not a binary operation")
@@ -240,8 +252,22 @@ and parse_exp (tokens: token list) : exp*(token list) =
 		let (e, new_tl) = parse_exp tl in
 		(Assign(v, e), new_tl) 
 	| _ -> 
-		let (e, new_tl) = parse_logical_or_exp tokens in
+		let (e, new_tl) = parse_conditional_exp tokens in
+		Printf.printf "Bubbled up to parse_exp, the tail is:\n";
+		print_tokens new_tl;
 		(e, new_tl)
+
+and parse_conditional_exp (tokens: token list) : exp*(token list) = 
+	let (condition, first_tl) = parse_logical_or_exp tokens in
+	match first_tl with
+	| QuestionMark::tl -> 
+		(let (true_branch, next_tl) = parse_exp tl in 
+		match next_tl with
+		| Colon::tl -> 
+			let (false_branch, final_tl) = parse_conditional_exp tl in
+			(Conditional(condition, true_branch, false_branch), final_tl)
+		| _ -> raise (Parse_exn "Missing colon in conditional"))
+	| _ -> (condition, first_tl)
 
 and parse_logical_or_exp (tokens: token list) : exp*(token list) =
 	let f = parse_exp_creator parse_logical_and_exp [OrToken] in
@@ -269,8 +295,9 @@ and parse_mul_exp (tokens: token list) : exp*(token list) =
 
 and parse_factor (tokens: token list) : exp*(token list) =
 	print_tokens tokens;
+	Printf.printf "We are in parse_factor\n";
 	match tokens with
-	| OpenParen::tl -> (match parse_logical_or_exp tl with
+	| OpenParen::tl -> (match parse_exp tl with
 						| (e, CloseParen::new_tl) -> (e, new_tl)
 						| _ -> raise (Parse_exn "Missing expression or ')' in factor"))
 	| Minus::tl -> let (inner_factor, new_tl) = parse_factor tl in
@@ -280,37 +307,32 @@ and parse_factor (tokens: token list) : exp*(token list) =
 	| LogicalNegation::tl -> let (inner_factor, new_tl) = parse_factor tl in
 								(UnOp(LogicalNegation, inner_factor), new_tl)
 	| Integer(x)::tl -> (Const(x), tl)
-	| Identifier(v)::OpenParen::tl -> let (params, new_tl) = parse_exp_list tl in
-										(Call(v, params), new_tl)
 	| Identifier(v)::tl -> (Var(v), tl)
 	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, BinOp, or Var")
 ;;
 
 let rec parse_if (tokens: token list) : statement*(token list) = 
+	print_tokens tokens;
 	match parse_exp tokens with
-		| (e, CloseParen::OpenBrace::tl) -> 
-			(match parse_statement_list tl with
+		| (e, CloseParen::tl) -> 
+			(match parse_statement tl with
 			| (true_branch, Keyword(a)::Keyword(b)::OpenParen::new_tl) when (a="else" && b="if") -> 
 					let (st, final_tl) = parse_if new_tl in
-					(If(e, true_branch, [st]), final_tl)
-			| (true_branch, Keyword(a)::OpenBrace::new_tl) when a="else" ->
-					let (false_branch, final_tl) = parse_statement_list new_tl in
-					(If(e, true_branch, false_branch), final_tl)
-			| (true_branch, new_tl) -> (If(e, true_branch, []), new_tl))
-		| _ -> raise (Parse_exn "Missing a '(' after the condition.")
+					(If(e, true_branch, Some(st)), final_tl)
+			| (true_branch, Keyword(a)::new_tl) when a="else" ->
+					let (false_branch, final_tl) = parse_statement new_tl in
+					(If(e, true_branch, Some(false_branch)), final_tl)
+			| (true_branch, new_tl) -> (If(e, true_branch, None), new_tl))
+		| _ -> 
+			print_tokens tokens;
+			raise (Parse_exn "Missing a '(' after the condition.")
 
 
-and parse_statement (tokens: token list) : statement*(token list) = 
+and parse_statement (tokens: token list): statement*(token list) = 
 	match tokens with
 	| Keyword(s)::tl when s="return" ->
 		(match parse_exp tl with 
 		| (e, Semicolon::tl) -> (Return(e), tl)
-		| _ -> raise (Parse_exn "Missing semicolon"))
-	| Keyword(s)::Identifier(v)::Semicolon::tl when s="int" ->	
-		(Declare(v, None), tl)
-	| Keyword(s)::Identifier(v)::AssignToken::tl when s="int" ->
-		(match parse_exp tl with 
-		| (e, Semicolon::tl) -> (Declare(v, Some(e)), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
 	| Keyword(s)::OpenParen::tl when s="if" -> parse_if tl
 	| _ -> 
@@ -318,11 +340,21 @@ and parse_statement (tokens: token list) : statement*(token list) =
 		| (e, Semicolon::tl) -> (Exp(e), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
 
-and parse_statement_list (tokens: token list) : (statement list)*(token list) =
-	let rec helper (tokens: token list) (acc: statement list) : (statement list)*(token list) =
+and parse_block_item (tokens: token list) : block_item*(token list) = 
+	match tokens with
+	| Keyword(s)::Identifier(v)::Semicolon::tl when s="int" ->	
+		(Declaration(Declare(v, None)), tl)
+	| Keyword(s)::Identifier(v)::AssignToken::tl when s="int" ->
+		(match parse_exp tl with 
+		| (e, Semicolon::tl) -> (Declaration(Declare(v, Some(e))), tl)
+		| _ -> raise (Parse_exn "Missing semicolon"))
+	| _ -> let (st, new_tokens) = parse_statement tokens in (Statement(st), new_tokens)
+
+and parse_block_item_list (tokens: token list) : (block_item list)*(token list) =
+	let rec helper (tokens: token list) (acc: block_item list) : (block_item list)*(token list) =
 		match tokens with
-		| CloseBrace::[] ->	(Return(Const(0))::acc, [])
-		| _ -> (match parse_statement tokens with
+		| CloseBrace::[] ->	(Statement(Return(Const(0)))::acc, [])
+		| _ -> (match parse_block_item tokens with
 				| (_, []) -> raise (Parse_exn "Missing '}' in function")
 				| (st, CloseBrace::tl) -> (st::acc, tl)
 				| (st, tok) -> helper tok (st::acc))
@@ -335,8 +367,8 @@ and parse_statement_list (tokens: token list) : (statement list)*(token list) =
 let parse_function (tokens: token list) : fun_decl*(token list) =
 	match tokens with
 	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
-		let (st_list, new_tl) = parse_statement_list tl in 
-		(Function(v, st_list), new_tl)
+		let (block_list, new_tl) = parse_block_item_list tl in 
+		(Function(v, block_list), new_tl)
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
 
@@ -357,57 +389,53 @@ let parse (tokens: token list) : program =
 
 (* Generate *)
 let rec generate_push_pop (e1: exp) (e2: exp) (ctx: context): string =
-	(generate_exp e1 ctx)
+	(fst (generate_exp e1 ctx 0))
 	^"pushq %rax\n"
-	^(generate_exp e2 ctx)
+	^(fst (generate_exp e2 
+		{var_map = V.add "" ctx.offset ctx.var_map; 
+		 offset = ctx.offset-8} 0))
 	^"popq %rcx\n"
 
 and generate_push_params (params: exp list) (ctx: context) : string = 
 	let rec helper (p: exp list) (acc: string) : string =
 		match p with
 		| [] -> acc
-		| hd::tl -> helper tl ((generate_exp hd ctx)^"pushq %rax"^acc)
+		| hd::tl -> helper tl ( (fst (generate_exp hd ctx 0))^"pushq %rax"^acc)
 	in
 	helper params ""
 
-and generate_exp (e: exp) (ctx: context): string = 
+and generate_exp (e: exp) (ctx: context) (j: int) : string*int = 
 	match e with
-	| BinOp(op, e1, e2) -> generate_binop op e1 e2 ctx
-	| Const(x) -> Printf.sprintf "movq $%i, %%rax\n" x
+	| BinOp(op, e1, e2) -> (generate_binop op e1 e2 ctx, j)
+	| Const(x) -> (Printf.sprintf "movq $%i, %%rax\n" x, j)
 	| UnOp(op, inner_factor) -> 
-		let inner_fac_assembly = generate_exp inner_factor ctx in
+		let inner_fac_assembly = fst (generate_exp inner_factor ctx 0) in
 		let unary_op_assembly =
 			(match op with
 			| Negation -> "neg %rax\n"
 			| LogicalNegation -> "cmpq $0, %rax\n movq $0, %rax\n sete %al\n"
 			| BitwiseComplement -> "not %rax\n") 
 		in
-		inner_fac_assembly^unary_op_assembly
+		(inner_fac_assembly^unary_op_assembly, j)
 	| Assign(v, e1) -> 
 		let offset = V.find v ctx.var_map in
 		let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" offset in
-		(generate_exp e1 ctx)
-		^assign
+		((fst (generate_exp e1 ctx 0))^assign, j)
 	| Var(v) -> 
 		let offset = V.find v ctx.var_map in
-		Printf.sprintf "movq %i(%%rbp), %%rax\n" offset
-	| Call(v, params) ->
-		 "pushq %rax\n"
-		^"pushq %rdx\n"
-		^"pushq %r8\n"
-		^"pushq %r9\n"
-		^"pushq %r10\n"
-		^"pushq %r11\n"
-		^(generate_push_params params ctx)
-		^(Printf.sprintf "call %s\n" v)
-		^"addq $48, %rsp"
-		^"popq %rax\n"
-		^"popq %rdx\n"
-		^"popq %r8\n"
-		^"popq %r9\n"
-		^"popq %r10\n"
-		^"popq %r11\n"
-
+		(Printf.sprintf "movq %i(%%rbp), %%rax\n" offset, j)
+	| Conditional(condition, true_exp, false_exp) ->
+		let (condition_code, new_j) = generate_exp condition ctx j in
+		let (true_code, mid_j) = generate_exp true_exp ctx new_j in
+		let (false_code, final_j) = generate_exp false_exp ctx mid_j in
+		(condition_code
+		^"cmpq $0, %rax\n"
+		^(Printf.sprintf "je .L%i\n" final_j)
+		^true_code
+		^(Printf.sprintf "jmp .L%i\n" (final_j+1))
+		^(Printf.sprintf ".L%i:\n" final_j)
+		^false_code
+		^(Printf.sprintf ".L%i:\n" (final_j+1)), final_j+2)
 
 and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) : string = 
 	match op with
@@ -459,31 +487,25 @@ and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) : st
 
 let rec generate_statement (st: statement) (ctx: context) (j: int) : string*context*int =
 	match st with
-	| Return(e) -> ((generate_exp e ctx)
-				   ^"movq %rbp, %rsp\n"
-				   ^"popq %rbp\n"
-				   ^"ret\n",
-					ctx, j)
-	| Declare (v, e) -> 
-		if V.mem v ctx.var_map then 
-			let s = Printf.sprintf "variable %s declared twice" v in
-			raise (Generate_exn s)
-		else
-			let evaluate = match e with
-					| None -> "movq $0, %rax\n"
-					| Some e1 -> generate_exp e1 ctx
-			in 
-			let assign = Printf.sprintf "movq %%rax, %i(%%rbp)\n" ctx.offset in
-			let new_ctx = {	var_map = V.add v ctx. offset ctx.var_map; 
-							offset = ctx.offset-8
-						}
-			in
-			(evaluate^assign, new_ctx, j)
-	| Exp(e) -> (generate_exp e ctx, ctx, j)
+	| Return(e) -> 
+		let (ret_code, new_j) = generate_exp e ctx j
+		in 
+		(ret_code
+		^"movq %rbp, %rsp\n"
+		^"popq %rbp\n"
+		^"ret\n", ctx, j)
+	| Exp(e) -> 
+		let (code, new_j) = generate_exp e ctx j in
+		(code, ctx, new_j)
 	| If(cond, true_st, false_st) ->
-		let (true_code, true_ctx, new_j) = generate_statement_list true_st ctx j in
-		let (false_code, false_ctx, final_j) = generate_statement_list false_st true_ctx new_j in
-		((generate_exp cond ctx)
+		let (condition_code, new_j) = generate_exp cond ctx j in
+		let (true_code, _, mid_j) = generate_statement true_st ctx new_j in
+		let (false_code, _, final_j) = 
+			match false_st with
+			| Some(st) -> generate_statement st ctx mid_j
+			| None -> ("", ctx, mid_j)
+		in
+		(condition_code
 		^"cmpq $0, %rax\n"
 		^(Printf.sprintf "je .L%i\n" final_j)
 		^true_code
@@ -492,25 +514,47 @@ let rec generate_statement (st: statement) (ctx: context) (j: int) : string*cont
 		^false_code
 		^(Printf.sprintf ".L%i:\n" (final_j+1)), ctx, final_j+2)
 
-and generate_statement_list (sts: statement list) (ctx: context) (j: int) : string*context*int = 
-	let rec helper (sts: statement list) (acc: string) (ctx: context) (j: int): string*context*int =
-		match sts with
+and generate_declaration (d: declaration) (ctx: context) (j: int) : string*context*int =
+	match d with
+	| Declare (v, e) -> 
+		if V.mem v ctx.var_map then 
+			let s = Printf.sprintf "variable %s declared twice" v in
+			raise (Generate_exn s)
+		else
+			let (evaluate, new_j) = match e with
+							| None -> ("movq $0, %rax\n", j)
+							| Some e1 -> generate_exp e1 ctx j
+			in 
+			let new_ctx = {	var_map = V.add v ctx.offset ctx.var_map; 
+							offset = ctx.offset-8
+						}
+			in
+			(evaluate^"pushq %rax\n", new_ctx, new_j)
+
+and generate_block_item (bi: block_item) (ctx: context) (j: int) : string*context*int = 
+	match bi with
+	| Statement(st) -> generate_statement st ctx j
+	| Declaration(d) -> generate_declaration d ctx j
+
+and generate_block_item_list (block_items: block_item list) (ctx: context) (j: int) : string*context*int = 
+	let rec helper (block_items: block_item list) (acc: string) (ctx: context) (j: int): string*context*int =
+		match block_items with
 		| [] -> (acc, ctx, j)
 		| hd::tl -> 
-			let (s, new_ctx, new_j) = generate_statement hd ctx j in
-			helper tl (acc^s) new_ctx new_j
+			let (bi, new_ctx, new_j) = generate_block_item hd ctx j in
+			helper tl (acc^bi) new_ctx new_j
 	in
-	helper sts "" ctx j
+	helper block_items "" ctx j
 ;;
 
 let generate_function (f: fun_decl) (j: int) : string*int = 
 	match f with
-	| Function(name, sts) -> 
-		let (statements, ctx, new_j) = generate_statement_list sts {var_map = V.empty; offset =  -8} j in
+	| Function(name, block_items) -> 
+		let (block_items, ctx, new_j) = generate_block_item_list block_items {var_map = V.empty; offset =  -8} j in
 		((Printf.sprintf ".globl %s\n%s:\n" name name) 
 		^"pushq %rbp\n"
 		^"movq %rsp, %rbp\n"
-		^statements, new_j)
+		^block_items, new_j)
 ;;
 
 let generate_function_list (fs: fun_decl list) : string = 
