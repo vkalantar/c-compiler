@@ -30,17 +30,25 @@ type exp =    Conditional of exp*exp*exp
 			| BinOp of binary_operator*exp*exp 
 			| UnOp of unary_operator*exp 
 			| Const of int
-type statement = Return of exp | Exp of exp | If of exp*statement*(statement option)
-type declaration = Declare of string*(exp option)
-type block_item = Statement of statement | Declaration of declaration
-type fun_decl = Function of string*(block_item list)
+
+type statement =  Return of exp 
+				| Exp of exp 
+				| If of exp*statement*(statement option) 
+				| Compound of block
+and declaration = Declare of string*(exp option)
+and block_item = Statement of statement | Declaration of declaration
+and block = block_item list
+
+type fun_decl = Function of string*block
 type program = Program of fun_decl list 
 
 (* Generating assembly *)
 module V = Map.Make(String);;
+module S = Set.Make(String);;
 type context = 
 	{ var_map : int V.t;
-	  offset  : int
+	  offset  : int;
+	  current_scope : S.t
 	}
 
 exception Parse_exn of string
@@ -335,6 +343,8 @@ and parse_statement (tokens: token list): statement*(token list) =
 		| (e, Semicolon::tl) -> (Return(e), tl)
 		| _ -> raise (Parse_exn "Missing semicolon"))
 	| Keyword(s)::OpenParen::tl when s="if" -> parse_if tl
+	| OpenBrace::tl -> 
+		let (block, new_tl) = parse_block tl in (Compound(block), new_tl)
 	| _ -> 
 		(match parse_exp tokens with 
 		| (e, Semicolon::tl) -> (Exp(e), tl)
@@ -350,8 +360,8 @@ and parse_block_item (tokens: token list) : block_item*(token list) =
 		| _ -> raise (Parse_exn "Missing semicolon"))
 	| _ -> let (st, new_tokens) = parse_statement tokens in (Statement(st), new_tokens)
 
-and parse_block_item_list (tokens: token list) : (block_item list)*(token list) =
-	let rec helper (tokens: token list) (acc: block_item list) : (block_item list)*(token list) =
+and parse_block (tokens: token list) : block*(token list) =
+	let rec helper (tokens: token list) (acc: block) : block*(token list) =
 		match tokens with
 		| CloseBrace::[] ->	(Statement(Return(Const(0)))::acc, [])
 		| _ -> (match parse_block_item tokens with
@@ -367,7 +377,7 @@ and parse_block_item_list (tokens: token list) : (block_item list)*(token list) 
 let parse_function (tokens: token list) : fun_decl*(token list) =
 	match tokens with
 	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
-		let (block_list, new_tl) = parse_block_item_list tl in 
+		let (block_list, new_tl) = parse_block tl in 
 		(Function(v, block_list), new_tl)
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
@@ -393,7 +403,8 @@ let rec generate_push_pop (e1: exp) (e2: exp) (ctx: context): string =
 	^"pushq %rax\n"
 	^(fst (generate_exp e2 
 		{var_map = V.add "" ctx.offset ctx.var_map; 
-		 offset = ctx.offset-8} 0))
+		 offset = ctx.offset-8;
+		 current_scope = ctx.current_scope } 0))
 	^"popq %rcx\n"
 
 and generate_push_params (params: exp list) (ctx: context) : string = 
@@ -513,12 +524,13 @@ let rec generate_statement (st: statement) (ctx: context) (j: int) : string*cont
 		^(Printf.sprintf ".L%i:\n" final_j)
 		^false_code
 		^(Printf.sprintf ".L%i:\n" (final_j+1)), ctx, final_j+2)
+	| Compound(b) -> generate_block b ctx j
 
 and generate_declaration (d: declaration) (ctx: context) (j: int) : string*context*int =
 	match d with
 	| Declare (v, e) -> 
-		if V.mem v ctx.var_map then 
-			let s = Printf.sprintf "variable %s declared twice" v in
+		if S.mem v ctx.current_scope then 
+			let s = Printf.sprintf "variable %s declared twice in current scope" v in
 			raise (Generate_exn s)
 		else
 			let (evaluate, new_j) = match e with
@@ -526,7 +538,8 @@ and generate_declaration (d: declaration) (ctx: context) (j: int) : string*conte
 							| Some e1 -> generate_exp e1 ctx j
 			in 
 			let new_ctx = {	var_map = V.add v ctx.offset ctx.var_map; 
-							offset = ctx.offset-8
+							offset = ctx.offset-8;
+							current_scope = S.add v ctx.current_scope
 						}
 			in
 			(evaluate^"pushq %rax\n", new_ctx, new_j)
@@ -536,21 +549,31 @@ and generate_block_item (bi: block_item) (ctx: context) (j: int) : string*contex
 	| Statement(st) -> generate_statement st ctx j
 	| Declaration(d) -> generate_declaration d ctx j
 
-and generate_block_item_list (block_items: block_item list) (ctx: context) (j: int) : string*context*int = 
-	let rec helper (block_items: block_item list) (acc: string) (ctx: context) (j: int): string*context*int =
+and generate_block (block_items: block) (ctx: context) (j: int) : string*context*int = 
+	let rec helper (block_items: block) (acc: string) (ctx: context) (j: int): string*context*int =
 		match block_items with
-		| [] -> (acc, ctx, j)
+		| [] -> (acc^(Printf.sprintf "addq $%i, %%rsp\n" (8*(S.cardinal ctx.current_scope))), ctx, j)
 		| hd::tl -> 
-			let (bi, new_ctx, new_j) = generate_block_item hd ctx j in
-			helper tl (acc^bi) new_ctx new_j
+			let (b, new_ctx, new_j) = generate_block_item hd ctx j in
+			helper tl (acc^b) new_ctx new_j
 	in
-	helper block_items "" ctx j
+	let empty_scope_ctx = {	var_map = ctx.var_map; 
+							offset = ctx.offset;
+							current_scope = S.empty
+						  }
+	in
+	let (code, _, new_j) = helper block_items "" empty_scope_ctx j in
+	(code, ctx, new_j)
 ;;
 
 let generate_function (f: fun_decl) (j: int) : string*int = 
 	match f with
 	| Function(name, block_items) -> 
-		let (block_items, ctx, new_j) = generate_block_item_list block_items {var_map = V.empty; offset =  -8} j in
+		let (block_items, ctx, new_j) = 
+			generate_block block_items 
+				{var_map = V.empty; 
+				offset =  -8; 
+				current_scope = S.empty;} j in
 		((Printf.sprintf ".globl %s\n%s:\n" name name) 
 		^"pushq %rbp\n"
 		^"movq %rsp, %rbp\n"
