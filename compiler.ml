@@ -274,11 +274,7 @@ and parse_exp (tokens: token list) : exp*(token list) =
 	| Identifier(v)::AssignToken::tl -> 
 		let (e, new_tl) = parse_exp tl in
 		(Assign(v, e), new_tl) 
-	| _ -> 
-		let (e, new_tl) = parse_conditional_exp tokens in
-		Printf.printf "Bubbled up to parse_exp, the tail is:\n";
-		print_tokens new_tl;
-		(e, new_tl)
+	| _ -> parse_conditional_exp tokens
 
 and parse_conditional_exp (tokens: token list) : exp*(token list) = 
 	let (condition, first_tl) = parse_logical_or_exp tokens in
@@ -317,8 +313,6 @@ and parse_mul_exp (tokens: token list) : exp*(token list) =
 	f tokens
 
 and parse_factor (tokens: token list) : exp*(token list) =
-	print_tokens tokens;
-	Printf.printf "We are in parse_factor\n";
 	match tokens with
 	| OpenParen::tl -> (match parse_exp tl with
 						| (e, CloseParen::new_tl) -> (e, new_tl)
@@ -360,8 +354,6 @@ let rec parse_for_decl (tokens: token list) : statement*(token list) =
 	(ForDecl(decl, cond, incr, st), final_tl)
 
 and parse_for (tokens: token list) : statement*(token list) = 
-	Printf.printf("Parsing for with tokens:\n");
-	print_tokens tokens;
 	let (init, cond_tl) = 
 		match tokens with 
 	 	| Semicolon::tl -> (None, tl)
@@ -381,7 +373,6 @@ and parse_for (tokens: token list) : statement*(token list) =
 	(For(init, cond, incr, body), final_tl)
 
 and parse_if (tokens: token list) : statement*(token list) = 
-	Printf.printf "Parsing if\n";
 	match parse_exp tokens with
 		| (e, CloseParen::tl) -> 
 			(match parse_statement tl with
@@ -395,8 +386,6 @@ and parse_if (tokens: token list) : statement*(token list) =
 		| _ -> raise (Parse_exn "Missing a '(' after the condition.")
 
 and parse_statement (tokens: token list) : statement*(token list) = 
-	Printf.printf "Parsing statement with tokens:\n";
-	print_tokens tokens;
 	match tokens with
 	(* Return *)
 	| Keyword(s)::tl when s="return" -> 
@@ -426,7 +415,7 @@ and parse_statement (tokens: token list) : statement*(token list) =
 			| _ -> raise (Parse_exn "Missing ')' in do loop"))
 		| _ -> raise (Parse_exn "missing 'while' in do loop"))
 	(* Break *)
-	| Keyword(s)::Semicolon::tl when s="break" -> Printf.printf "encountered break\n"; (Break, tl)
+	| Keyword(s)::Semicolon::tl when s="break" -> (Break, tl)
 	(* Continue *)
 	| Keyword(s)::Semicolon::tl when s="continue" -> (Continue, tl)
 	(* Null *)
@@ -528,23 +517,17 @@ let update_b_and_c (ctx: context) (b: int) (c: int) : context =
 	update_continue (update_break ctx b) c
 ;;
 
-let rec generate_push_pop (e1: exp) (e2: exp) (ctx: context) : string =
-	(fst (generate_exp e1 ctx 0))
+let rec generate_push_pop (e1: exp) (e2: exp) (ctx: context) (j: int) : string*int =
+	let (e1_code, new_j) = generate_exp e1 ctx j in
+	let (e2_code, final_j) = generate_exp e2 (add_var ctx "") new_j in
+	(e1_code
 	^"pushq %rax\n"
-	^(fst (generate_exp e2 (add_var ctx "") 0))
-	^"popq %rcx\n"
-
-and generate_push_params (params: exp list) (ctx: context) : string = 
-	let rec helper (p: exp list) (acc: string) : string =
-		match p with
-		| [] -> acc
-		| hd::tl -> helper tl ( (fst (generate_exp hd ctx 0))^"pushq %rax"^acc)
-	in
-	helper params ""
+	^e2_code
+	^"popq %rcx\n", final_j)
 
 and generate_exp (e: exp) (ctx: context) (j: int) : string*int = 
 	match e with
-	| BinOp(op, e1, e2) -> (generate_binop op e1 e2 ctx, j)
+	| BinOp(op, e1, e2) -> generate_binop op e1 e2 ctx j
 	| Const(x) -> (Printf.sprintf "movq $%i, %%rax\n" x, j)
 	| UnOp(op, inner_factor) -> 
 		let inner_fac_assembly = fst (generate_exp inner_factor ctx 0) in
@@ -575,56 +558,68 @@ and generate_exp (e: exp) (ctx: context) (j: int) : string*int =
 		^false_code
 		^(Printf.sprintf ".L%i:\n" (final_j+1)), final_j+2)
 
-and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) : string = 
+and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) (j: int) : string*int = 
+	let (push_pop_code, final_j) = generate_push_pop e1 e2 ctx j in
+	let (rev_push_pop_code, final_j) = generate_push_pop e2 e1 ctx j in 
 	match op with
-	| Multiply -> (generate_push_pop e1 e2 ctx)
-				  ^"imulq %rcx\n"
-	| Divide -> (generate_push_pop e2 e1 ctx)
+	| Multiply -> (push_pop_code
+				  ^"imulq %rcx\n", final_j)
+	| Divide -> (rev_push_pop_code
 				^"xor %rdx, %rdx\n"
-				^"idivq %rcx\n"
-	| Mod -> (generate_push_pop e2 e1 ctx)
+				^"idivq %rcx\n", j)
+	| Mod -> (rev_push_pop_code
 			 ^"xor %rdx, %rdx\n"
 			 ^"idivq %rcx\n"
-			 ^"movq %rdx, %rax\n"
-	| Add -> (generate_push_pop e1 e2 ctx)
-			 ^"addq %rcx, %rax\n"
-	| Subtract -> (generate_push_pop e2 e1 ctx)
-				  ^"subq %rcx, %rax\n"
-	| GreaterThan -> (generate_push_pop e2 e1 ctx)
+			 ^"movq %rdx, %rax\n", final_j)
+	| Add -> (push_pop_code
+			 ^"addq %rcx, %rax\n", final_j)
+	| Subtract -> (rev_push_pop_code
+				  ^"subq %rcx, %rax\n", final_j)
+	| GreaterThan -> (rev_push_pop_code
 					 ^"cmpq %rcx, %rax\n"
 					 ^"movq $0, %rax\n"
-					 ^"setg %al\n"
-	| LessThan -> (generate_push_pop e2 e1 ctx)
+					 ^"setg %al\n", final_j)
+	| LessThan -> (rev_push_pop_code
 				  ^"cmpq %rcx, %rax\n"
 				  ^"movq $0, %rax\n"
-				  ^"setl %al\n"
-	| GTorEqual -> (generate_push_pop e2 e1 ctx)
+				  ^"setl %al\n", final_j)
+	| GTorEqual -> (rev_push_pop_code
 				   ^"cmpq %rcx, %rax\n"
 				   ^"movq $0, %rax\n"
-				   ^"setge %al\n"
-	| LTorEqual -> (generate_push_pop e2 e1 ctx)
+				   ^"setge %al\n", final_j)
+	| LTorEqual -> (rev_push_pop_code
 				   ^"cmpq %rcx, %rax\n"
 				   ^"movq $0, %rax\n"
-				   ^"setle %al\n"
-	| Equal -> (generate_push_pop e1 e2 ctx)
+				   ^"setle %al\n", final_j)
+	| Equal -> (push_pop_code
 				^"cmpq %rcx, %rax\n"
 				^"movq $0, %rax\n"
-				^"sete %al\n"
-	| NotEqual -> (generate_push_pop e1 e2 ctx)
-				^"cmpq %rcx, %rax\n"
-				^"movq $0, %rax\n"
-				^"setne %al\n"
-	| AND -> (generate_push_pop e1 e2 ctx)
-			 ^"cmpq $0, %rcx\n"
-			 ^"setne %cl\n"
-			 ^"cmpq $0, %rax\n"
-			 ^"movq $0, %rax\n"
-			 ^"setne %al\n"
-			 ^"andb %cl, %al\n"
-	| OR -> (generate_push_pop e1 e2 ctx)
-			^"orq %rcx, %rax\n"
+				^"sete %al\n", final_j)
+	| NotEqual -> (push_pop_code
+					^"cmpq %rcx, %rax\n"
+					^"movq $0, %rax\n"
+					^"setne %al\n", final_j)
+	| AND -> ((fst (generate_exp e1 ctx 0))
+			^"cmpq $0, %rax\n"
+			^(Printf.sprintf "jne .L%i\n" final_j)
+			^(Printf.sprintf "jmp .L%i\n" (final_j+1))
+			^(Printf.sprintf ".L%i:\n" final_j)
+			^(fst (generate_exp e2 ctx 0))
+			^"cmpq $0, %rax\n"
 			^"movq $0, %rax\n"
 			^"setne %al\n"
+			^(Printf.sprintf ".L%i:\n" (final_j+1)), final_j+2)
+	| OR -> ((fst (generate_exp e1 ctx 0))
+			^"cmpq $0, %rax\n"
+			^(Printf.sprintf "je .L%i\n" final_j)
+			^"movq $1, %rax\n"
+			^(Printf.sprintf "jmp .L%i\n" (final_j+1))
+			^(Printf.sprintf ".L%i:\n" final_j)
+			^(fst (generate_exp e2 ctx 0))
+			^"cmpq $0, %rax\n"
+			^"movq $0, %rax\n"
+			^"setne %al\n"
+			^(Printf.sprintf ".L%i:\n" (final_j+1)), final_j+2)
 ;;
 
 let rec generate_statement (st: statement) (ctx: context) (j: int) : string*context*int =
@@ -837,8 +832,8 @@ let generate (ast: program) : string =
 let all_lines = single_string (read_lines Sys.argv.(1)) " " in
 let assembly_filename = "/mnt/c/Users/Varqa/Documents/Compiler/write_a_c_compiler/"^(List.hd (Str.split (regexp "\\.") Sys.argv.(1)))^".s" in
 let out = open_out assembly_filename in
-print_tokens (lex (to_list all_lines));
-print_string "\n";
+(* print_tokens (lex (to_list all_lines));
+print_string "\n"; *)
 Printf.fprintf out "%s" (generate (parse (lex (to_list all_lines))));;
 
 
