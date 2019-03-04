@@ -10,7 +10,7 @@ type token =  OpenBrace | CloseBrace | OpenParen | CloseParen
 			| Plus | Minus | Times | ForwardSlash | Percent
 			| AndToken | OrToken | EqualToken | NotEqualToken
 			| LTToken | LTorEqualToken | GTToken | GTorEqualToken
-			| Colon | QuestionMark
+			| Colon | QuestionMark | Comma
 			| AssignToken
 			| Keyword of string
 			| Integer of int
@@ -24,7 +24,8 @@ type binary_operator =  OR | AND | Equal | NotEqual
 						| Add | Subtract | Multiply | Divide | Mod
 
 
-type exp =    Conditional of exp*exp*exp
+type exp =    FunCall of string*(exp list)
+			| Conditional of exp*exp*exp
 			| Assign of string*exp
 			| Var of string 
 			| BinOp of binary_operator*exp*exp 
@@ -47,8 +48,18 @@ and declaration = Declare of string*(exp option)
 and block_item = Statement of statement | Declaration of declaration
 and block = block_item list
 
-type fun_decl = Function of string*block
+type fun_decl = Function of string*(string list)*(block option)
 type program = Program of fun_decl list 
+
+(* Validation*)
+type f_state = {
+	name: string;
+	num_params: int;
+	defined: bool;
+	block_validated: bool;
+}
+
+type f_ctx = f_state list
 
 (* Generating assembly *)
 module V = Map.Make(String);;
@@ -62,6 +73,7 @@ type context =
 	}
 
 exception Parse_exn of string
+exception Validation_exn of string
 exception Generate_exn of string
 
 
@@ -120,6 +132,7 @@ let translate_to_token (cl: char list) : token =
 	if s = "=" then AssignToken else
 	if s = ":" then Colon else
 	if s = "?" then QuestionMark else
+	if s = "," then Comma else
 	if s = "<=" then LTorEqualToken else
 	if s = ">=" then GTorEqualToken else 
 	if s = "&&" then AndToken else
@@ -149,7 +162,7 @@ let symbols_to_tokens (symbols: char list) : token list =
 ;;
 
 let rec lex_helper (input: char list) (word_acc: char list) (symbol_acc: char list) (token_acc: token list) : token list = 
-	let symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/'; '%'; '<'; '>'; '&'; '|'; '='; ':'; '?' ] in
+	let symbols = ['{'; '}'; '('; ')'; ';'; '!'; '~'; '+'; '-'; '*'; '/'; '%'; '<'; '>'; '&'; '|'; '='; ':'; '?'; ',' ] in
 	let whitespaces = [' '; '\n'; '\r'; '\x0c'; '\t'] in
 	match input with
 	| [] -> token_acc
@@ -200,6 +213,7 @@ let print_token (t: token) : string =
 	| AssignToken -> "="
 	| Colon -> ":"
 	| QuestionMark -> "?"
+	| Comma -> ","
 	| Keyword(s) -> "Keyword "^s
 	| Identifier(s) -> "Identifier "^s
 	| Integer(x) -> "Integer "^(string_of_int x)
@@ -234,7 +248,7 @@ let token_to_binary_operator (t: token) : binary_operator =
 	| NotEqualToken -> NotEqual
 	| AndToken -> AND
 	| OrToken -> OR
-	| AssignToken | Colon | QuestionMark -> raise (Parse_exn "This is not a binary operation")
+	| AssignToken | Colon | QuestionMark | Comma -> raise (Parse_exn "This is not a binary operation")
 	| OpenBrace | CloseBrace | OpenParen | CloseParen -> raise (Parse_exn "This is not a binary operation")
 	| Semicolon | BitwiseComplement | LogicalNegation -> raise (Parse_exn "This is not a binary operation")
 	| Keyword(_) | Identifier(_) | Integer(_) | Null -> raise (Parse_exn "This is not a binary operation")
@@ -314,6 +328,7 @@ and parse_mul_exp (tokens: token list) : exp*(token list) =
 
 and parse_factor (tokens: token list) : exp*(token list) =
 	match tokens with
+	| Identifier(v)::OpenParen::tl -> parse_function_call (Identifier(v)::OpenParen::tl)
 	| OpenParen::tl -> (match parse_exp tl with
 						| (e, CloseParen::new_tl) -> (e, new_tl)
 						| _ -> raise (Parse_exn "Missing expression or ')' in factor"))
@@ -325,7 +340,19 @@ and parse_factor (tokens: token list) : exp*(token list) =
 								(UnOp(LogicalNegation, inner_factor), new_tl)
 	| Integer(x)::tl -> (Const(x), tl)
 	| Identifier(v)::tl -> (Var(v), tl)
-	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, BinOp, or Var")
+	| _ -> raise (Parse_exn "parse_factor expects an Integer, UnOp, BinOp, Var, or FunCall")
+
+and parse_function_call (tokens: token list) : exp*(token list) = 
+	let rec parse_arguments (tokens: token list) (acc: exp list) : (exp list)*(token list) =
+		match tokens with
+		| CloseParen::tl ->	((List.rev acc), tl)
+		| Comma::tl -> parse_arguments tl acc
+		| _ -> let (e, tl) = parse_exp tokens in (parse_arguments tl (e::acc))
+	in
+	match tokens with 
+	| Identifier(v)::OpenParen::tl -> let (args, final_tl) = parse_arguments tl [] in
+										(FunCall(v, args), final_tl)
+	| _ -> raise (Parse_exn "Exception in parse_function_call")
 ;;
 
 let make_option (tuple: 'a*'b) : ('a option)*'b =
@@ -454,10 +481,24 @@ and parse_block (tokens: token list) : block*(token list) =
 
 
 let parse_function (tokens: token list) : fun_decl*(token list) =
-	match tokens with
-	| Keyword(k)::Identifier(v)::OpenParen::CloseParen::OpenBrace::tl when k="int" ->
-		let (block_list, new_tl) = parse_block tl in 
-		(Function(v, block_list), new_tl)
+	let rec parse_parameters (tokens: token list) (acc: string list) : (string list)*(token list) =
+		match tokens with
+		| CloseParen::tl ->	((List.rev acc), tl)
+		| Keyword(k)::Identifier(v)::Comma::tl when k="int" -> parse_parameters tl (v::acc)
+		| Keyword(k)::Identifier(v)::CloseParen::tl when k="int" -> ((List.rev (v::acc)), tl)
+		| _ -> raise (Parse_exn "Function declaration syntax is incorrect - parameters")
+	in
+
+	match tokens with 
+	| Keyword(k)::Identifier(v)::OpenParen::tl when k="int" ->
+		let (params, new_tl) = parse_parameters tl [] in
+		(match new_tl with
+		| Semicolon::final_tl -> (Function(v, params, None), final_tl)
+		| OpenBrace::block_tl ->
+			let (block, final_tl) = parse_block block_tl in
+			(Function(v, params, Some(block)), final_tl)
+		| _ -> print_tokens new_tl; raise (Parse_exn "Function declaration syntax is incorrect")	
+		)
 	| _ -> raise (Parse_exn "Function declaration syntax is incorrect")	
 ;;
 
@@ -476,11 +517,164 @@ let parse (tokens: token list) : program =
 	fst (parse_program tokens) 
 ;;
 
+(* Validate *)
+let rec validate_program (p: program) : bool = 
+	let rec helper (f_list: fun_decl list) (curr_f_states: f_ctx) (err: bool) : bool = 
+		match f_list with
+		| [] -> err
+		| f::tl -> 
+			let (new_f_states, new_err) = validate_function f curr_f_states in
+			helper tl new_f_states (err && new_err)
+	in
+	match p with 
+	| Program(f_list) -> helper f_list [] true
+
+and validate_function (f: fun_decl) (f_states: f_ctx) : f_ctx*bool =
+	let (name, params, definition) = 
+		match f with
+		| Function(n, p, d) -> (n, p, d)
+	in
+
+	let f_state_match = List.filter (fun (x : f_state) -> x.name = name) f_states in
+	match f_state_match with
+	| [] -> 
+		let n = List.length params in
+		let def = (if definition = None then false else true) in 
+		let new_f_state = 
+			{ 	
+				name = name;
+				num_params = n;
+				defined = def;
+				block_validated = true;
+			}
+		in let new_f_states = new_f_state::f_states
+		in (new_f_states, validate_block_option definition new_f_states)
+	| f_state::[] -> 
+		if f_state.num_params != (List.length params) then
+			raise (Validation_exn "A function is declared with different numbers of parameters")
+		else if definition != None && (f_state.defined) then
+			raise (Validation_exn "A function is defined more than once")
+		else
+			let targeted_replacer (old_fs: f_state) : f_state =
+				if old_fs.name = name then
+					{
+						name = old_fs.name;
+						num_params = old_fs.num_params;
+						defined = true;
+						block_validated = old_fs.block_validated;
+					}
+				else old_fs
+			in
+			let valid_block = 
+				if f_state.block_validated then true 
+				else validate_block_option definition f_states 
+			in
+			(List.map targeted_replacer f_states, valid_block)
+		| _ -> raise (Validation_exn "Problem in validate_function")
+
+and validate_block (b: block) (f_states: f_ctx) : bool = 
+	let curried_val_bi (bi: block_item) : bool =
+		validate_block_item bi f_states
+	in
+	let fold_function (prev_valid: bool) (bi: block_item) : bool = prev_valid && (curried_val_bi bi) in
+	List.fold_left fold_function true b
+
+and validate_block_option (b_option: block option) (f_states: f_ctx) : bool = 
+	match b_option with
+	| Some(b) -> validate_block b f_states
+	| None -> true
+
+and validate_block_item (bi: block_item) (f_states: f_ctx) : bool = 
+	match bi with
+	| Statement(st) -> validate_statement st f_states
+	| Declaration(d) -> validate_declaration d f_states
+
+and validate_declaration (d: declaration) (f_states: f_ctx) : bool = 
+	match d with
+	| Declare(_, e_option) -> validate_expression_option e_option f_states
+
+and validate_statement (st: statement) (f_states: f_ctx) : bool = 
+	match st with
+	| Return(e) -> validate_expression e f_states
+	| Exp(e_option) -> validate_expression_option e_option f_states
+	| If(e, st, st_option) ->     
+		validate_expression e f_states
+		&& validate_statement st f_states
+		&& validate_statement_option st_option f_states
+	| Compound(b) -> validate_block b f_states
+	| For(e1_option, e2, e3_option, st) ->
+			validate_expression_option e1_option f_states
+			&& validate_expression e2 f_states
+			&& validate_expression_option e3_option f_states
+			&& validate_statement st f_states
+	| ForDecl(d, e1, e2_option, st) -> 
+		validate_declaration d f_states
+		&& validate_expression e1 f_states
+		&& validate_expression_option e2_option f_states
+		&& validate_statement st f_states
+	| While(e, st) -> validate_expression e f_states && validate_statement st f_states
+	| Do(st, e) -> validate_statement st f_states && validate_expression e f_states
+	| Break | Continue | NullStatement -> true
+
+and validate_expression (e: exp) (f_states: f_ctx) : bool = 
+	match e with
+	| FunCall(name, args) -> validate_function_call name args f_states
+	| Conditional(e1, e2, e3) -> 
+		validate_expression e1 f_states
+		&& validate_expression e2 f_states
+		&& validate_expression e3 f_states
+	| Assign(s, e) -> validate_expression e f_states
+	| BinOp(op, e1, e2) ->
+		validate_expression e1 f_states && validate_expression e2 f_states
+	| UnOp(op, e) -> validate_expression e f_states
+	| Var(_) | Const(_) -> true
+
+and validate_function_call (name: string) (args: exp list) (f_states: f_ctx): bool =
+	let curried_val_exp (e: exp) : bool =
+		validate_expression e f_states
+	in
+	let fold_function (prev_valid: bool) (e: exp) : bool = prev_valid && (curried_val_exp e) in
+	let args_valid = List.fold_left fold_function true args in
+
+	let f_state_match = List.filter (fun (x : f_state) -> x.name = name) f_states in
+	let call_valid = 
+		match f_state_match with
+		| [] -> raise (Validation_exn "Implicit function definition")
+		| f_state::[] -> 
+			if f_state.num_params != (List.length args) then
+				raise (Validation_exn "A function is defined with different numbers of parameters")
+			else
+				true
+		| _ -> raise (Validation_exn "Problem in validate_function_call")
+	in 
+	args_valid && call_valid
+
+and validate_expression_option (e_option: exp option) (f_states: f_ctx) : bool = 
+	match e_option with
+	| Some(e) -> validate_expression e f_states
+	| None -> true
+
+and validate_statement_option (st_option: statement option) (f_states: f_ctx) : bool = 
+	match st_option with
+	| Some(st) -> validate_statement st f_states
+	| None -> true
+;;
+
+
 (* Generate *)
 let new_scope (ctx: context) : context = 
 	{ 	var_map = ctx.var_map;
 		offset = ctx.offset;
 		current_scope = S.empty;
+		break = ctx.break;
+		continue = ctx.continue
+	}
+;;
+
+let add_param (ctx: context) (v: string) (ebp_offset: int): context = 
+	{ 	var_map = V.add v ebp_offset ctx.var_map;
+		offset = ctx.offset;
+		current_scope = S.add v ctx.current_scope;
 		break = ctx.break;
 		continue = ctx.continue
 	}
@@ -557,6 +751,21 @@ and generate_exp (e: exp) (ctx: context) (j: int) : string*int =
 		^(Printf.sprintf ".L%i:\n" final_j)
 		^false_code
 		^(Printf.sprintf ".L%i:\n" (final_j+1)), final_j+2)
+	| FunCall(name, arguments) -> 
+		let rec arg_helper (code: string) (j: int) (args: exp list) : int*string =
+			match args with
+			 | [] -> (j, code)
+			 | arg::tl -> 
+			 	let (arg_code, new_j) = generate_exp arg ctx j in
+			 	arg_helper (code^arg_code^"pushq %rax\n") new_j tl 
+		in
+		let (new_j, arguments_code) = arg_helper "" j (List.rev arguments) in
+		let bytes_to_remove = 8*(List.length arguments) in 
+		(arguments_code
+		^"call "^name^"\n"
+		^(Printf.sprintf "addq $%i, %%rsp\n" bytes_to_remove), new_j)
+
+
 
 and generate_binop (op: binary_operator) (e1: exp) (e2: exp) (ctx: context) (j: int) : string*int = 
 	let (push_pop_code, final_j) = generate_push_pop e1 e2 ctx j in
@@ -799,19 +1008,43 @@ and generate_block (block_items: block) (ctx: context) (j: int) : string*context
 ;;
 
 let generate_function (f: fun_decl) (j: int) : string*int = 
+	let context_creator (parameters: string list) : context =
+		let rec context_creator_helper (ctx: context) (ebp_offset: int) (params: string list): context = 
+			match params with
+			| [] -> ctx
+			| param::tl -> context_creator_helper (add_param ctx param ebp_offset) (ebp_offset + 8) tl
+		in
+		let ctx = { var_map = V.empty; 
+					offset = -8; 
+					current_scope = S.empty;
+					break = [];
+					continue = [] } 
+		in 
+		context_creator_helper ctx 16 parameters
+	in
+
+	let rec generate_body (block_items: block) (ctx: context) (j: int) : string*int = 
+		let rec helper (block_items: block) (acc: string) (ctx: context) (j: int): string*context*int =
+			match block_items with
+			| [] -> (acc^(Printf.sprintf "addq $%i, %%rsp\n" (8*(S.cardinal ctx.current_scope))), ctx, j)
+			| hd::tl -> 
+				let (b, new_ctx, new_j) = generate_block_item hd ctx j in
+				helper tl (acc^b) new_ctx new_j
+		in
+		let (code, _, new_j) = helper block_items "" ctx j in
+		(code, new_j)
+	in
+
 	match f with
-	| Function(name, block_items) -> 
-		let (block_code, ctx, new_j) = 
-			generate_block block_items 
-				{var_map = V.empty; 
-				offset =  -8; 
-				current_scope = S.empty;
-				break = [];
-				continue = [] } j in
-		((Printf.sprintf ".globl %s\n%s:\n" name name) 
-		^"pushq %rbp\n"
-		^"movq %rsp, %rbp\n"
-		^block_code, new_j)
+	| Function(name, parameters, block_items) -> 
+		let ctx = context_creator parameters in 	
+		match block_items with
+		| Some(b) -> let (block_code, new_j) = generate_body b ctx j in
+			((Printf.sprintf ".globl %s\n%s:\n" name name) 
+			^"pushq %rbp\n"
+			^"movq %rsp, %rbp\n"
+			^block_code, new_j)
+		| None -> ("", j)
 ;;
 
 let generate_function_list (fs: fun_decl list) : string = 
@@ -832,8 +1065,11 @@ let generate (ast: program) : string =
 let all_lines = single_string (read_lines Sys.argv.(1)) " " in
 let assembly_filename = "/mnt/c/Users/Varqa/Documents/Compiler/write_a_c_compiler/"^(List.hd (Str.split (regexp "\\.") Sys.argv.(1)))^".s" in
 let out = open_out assembly_filename in
-(* print_tokens (lex (to_list all_lines));
-print_string "\n"; *)
-Printf.fprintf out "%s" (generate (parse (lex (to_list all_lines))));;
+let program = parse (lex (to_list all_lines)) in 
+if validate_program program then
+	Printf.fprintf out "%s" (generate program)
+else
+	raise (Validation_exn "Something wrong in validation stage")
+;;
 
 
